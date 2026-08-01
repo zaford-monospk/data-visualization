@@ -102,13 +102,13 @@ Material:
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EnvironmentReflections: 1
-    - _GlobalAlpha: 1
+    - _GlobalAlpha: 0.466
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
-    - _MaxPointSize: 0.01
+    - _MaxPointSize: 0.02
     - _Metallic: 0
-    - _MinPointSize: 0.02
+    - _MinPointSize: 0.001
     - _OcclusionStrength: 1
     - _Parallax: 0.005
     - _PointSize: 0.05
