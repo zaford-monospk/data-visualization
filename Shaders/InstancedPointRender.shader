@@ -2,8 +2,7 @@ Shader "Custom/InstancedPointRender"
 {
     Properties
     {
-        _ColorCold("Cold Color", Color) = (0, 0.2, 1, 1)
-        _ColorHot("Hot Color", Color) = (1, 0.2, 0, 1)
+        _TemperatureLUT("Temp LUT",2D) = "white" {}
         _MinPointSize("Min Point Size", Float) = 0.02
         _MaxPointSize("Max Point Size", Float) = 0.1
         _AlphaCutoff("Alpha Cutoff", Range(0, 1)) = 0.1
@@ -17,9 +16,9 @@ Shader "Custom/InstancedPointRender"
         // once per cell via Graphics.RenderMeshIndirect. VtkUnstructuredGridRenderer
         // uploads one {float3 position, float temperature, float3 velocity,
         // float pressure} per cell into _CellBuffer, indexed here with
-        // SV_InstanceID: Temperature -> color + alpha (via _ColorCold/_ColorHot's
-        // own alpha channels), Pressure -> size, Velocity -> orientation (mesh
-        // local +Z axis points along the velocity direction).
+        // SV_InstanceID: Temperature -> color (sampled from _TemperatureLUT,
+        // u = normalized temperature, v = 0.5), Pressure -> size, Velocity ->
+        // orientation (mesh local +Z axis points along the velocity direction).
         Tags { "RenderType" = "Transparent" "Queue" = "Transparent" "RenderPipeline" = "UniversalPipeline" }
 
         Pass
@@ -47,10 +46,11 @@ Shader "Custom/InstancedPointRender"
             };
 
             StructuredBuffer<CellInstance> _CellBuffer;
-            
+
+            TEXTURE2D(_TemperatureLUT);
+            SAMPLER(sampler_TemperatureLUT);
+
             CBUFFER_START(UnityPerMaterial)
-                half4 _ColorCold;
-                half4 _ColorHot;
                 float _MinPointSize;
                 float _MaxPointSize;
                 float _AlphaCutoff;
@@ -95,9 +95,14 @@ Shader "Custom/InstancedPointRender"
                 // transform (RenderMeshIndirect is driven purely from _CellBuffer).
                 float3 positionWS = cell.position + localOffset;
 
+                // Vertex stage can't take implicit derivatives, so this is an
+                // explicit-LOD lookup (LOD 0 — the LUT has no mips anyway).
+                float2 lutUV = float2(saturate(cell.temperature), 0.5);
+                half4 lutColor = SAMPLE_TEXTURE2D_LOD(_TemperatureLUT, sampler_TemperatureLUT, lutUV, 0);
+
                 Varyings OUT;
                 OUT.positionHCS = TransformWorldToHClip(positionWS);
-                OUT.color = lerp(_ColorCold, _ColorHot, saturate(cell.temperature));
+                OUT.color = lutColor;
                 OUT.color.a = _GlobalAlpha;
                 return OUT;
             }
