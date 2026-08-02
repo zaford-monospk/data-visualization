@@ -9,16 +9,19 @@ namespace Monospark
         public MeshRenderer TargetCube;
 
         public VtkUnstructuredGridRenderer VtkRenderer;
-        
+
+        public string frameSequencePath;
+        public VtkFrameSequencePlayer FramePlayer;
+
         public void ReadTargetFile(){
             filePath = Application.dataPath +            
-                       "/Resources/Data/room.vtk"; 
+                       "/Resources/Data/Static/room.vtk"; 
            gameObject.AddComponent<DataConvertManager>().GetMap<VtkUnstructuredGridReader>(OnProcessData,filePath);
         }
         
         public void ReadTargetFileForInstance(){
             filePath = Application.dataPath +            
-                       "/Resources/Data/room.vtk"; 
+                       "/Resources/Data/Static/room.vtk"; 
             gameObject.AddComponent<DataConvertManager>().GetMap<VtkUnstructuredGridReader>(OnProcessDataBuffer,filePath);
         }
 
@@ -37,6 +40,19 @@ namespace Monospark
         {
             if(processData.Status == DataConverter.eStatus.SUCCESS)
                 VtkRenderer.Set(structeredbuffer);
+        }
+
+        public void ReadTargetFrameSequence(){
+            frameSequencePath = Application.dataPath +
+                       "/Resources/Data/Timestep";
+            gameObject.AddComponent<DataConvertManager>().GetMap<VtkFrameSequenceReader>(OnProcessFrameSequence, frameSequencePath);
+        }
+
+        private void OnProcessFrameSequence(DataConverter.Progress processData, VtkFrameSequenceData sequence)
+        {
+            Debug.Log(processData.Status);
+            if (processData.Status == DataConverter.eStatus.SUCCESS)
+                FramePlayer.Set(sequence);
         }
     }
 }

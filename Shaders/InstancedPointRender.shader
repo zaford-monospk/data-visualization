@@ -7,6 +7,8 @@ Shader "Custom/InstancedPointRender"
         _MaxPointSize("Max Point Size", Float) = 0.1
         _AlphaCutoff("Alpha Cutoff", Range(0, 1)) = 0.1
         _GlobalAlpha("Alpha",Range(0,1)) = 0.5
+        _ClipMin("Clip Range Min", Range(0, 1)) = 0
+        _ClipMax("Clip Range Max", Range(0, 1)) = 1
     }
 
     SubShader
@@ -30,6 +32,7 @@ Shader "Custom/InstancedPointRender"
             // don't cost overdraw or leave faint fringing.
             Blend SrcAlpha OneMinusSrcAlpha
             ZWrite On
+            ZTest LEqual
 
             HLSLPROGRAM
             #pragma vertex vert
@@ -54,6 +57,8 @@ Shader "Custom/InstancedPointRender"
                 float _MinPointSize;
                 float _MaxPointSize;
                 float _AlphaCutoff;
+                float _ClipMin;
+                float _ClipMax;
             CBUFFER_END
             float _GlobalAlpha;
             struct Attributes
@@ -100,10 +105,16 @@ Shader "Custom/InstancedPointRender"
                 float2 lutUV = float2(saturate(cell.temperature), 0.5);
                 half4 lutColor = SAMPLE_TEXTURE2D_LOD(_TemperatureLUT, sampler_TemperatureLUT, lutUV, 0);
 
+                // Value-range filter: glyphs outside [_ClipMin, _ClipMax] get
+                // alpha 0, so frag's existing _AlphaCutoff clip discards them —
+                // one instance = one glyph here, so there's no per-sample
+                // accumulation to preserve the way VolumeRenderer's raymarch has.
+                half inRange = step(_ClipMin, cell.temperature) * step(cell.temperature, _ClipMax);
+
                 Varyings OUT;
                 OUT.positionHCS = TransformWorldToHClip(positionWS);
                 OUT.color = lutColor;
-                OUT.color.a = _GlobalAlpha;
+                OUT.color.a = _GlobalAlpha * inRange;
                 return OUT;
             }
 

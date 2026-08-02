@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -15,10 +16,10 @@ namespace Monospark
     // by DataConvertManager.GetMap<T>, which calls Init(filepath) then BuildData(callback).
     public class VtkUnstructuredGridReader : DataConverter
     {
-        static readonly char[] Separators = { ' ' };
         const int SampleRowCount = 5;
         const int MinResolution = 8;
         const int MaxResolution = 128;
+        const int StreamBufferSize = 1 << 20; // 1 MB — fewer underlying reads over a ~4M-line file
 
         public string FieldName { get; set; } = "Temperature(C)";
 
@@ -71,6 +72,16 @@ namespace Monospark
             }
         }
 
+        // This reader parses a single unstructured-grid snapshot, not a voxelized
+        // time sequence — that's VtkFrameSequenceReader's job (a standalone
+        // loader, not a DataConverter, since it consumes a directory of two
+        // files rather than DataConverter's single FilePath).
+        public override void BuildData(OnProcessFrameSequenceData callback)
+        {
+            throw new NotSupportedException(
+                $"{nameof(VtkUnstructuredGridReader)} does not produce a {nameof(VtkFrameSequenceData)}; use VtkFrameSequenceReader instead.");
+        }
+
         // Both BuildData overloads need a parsed file; only do the actual
         // (expensive, 4M-line) parse once even if both are called on this instance.
         Task EnsureParsedAsync()
@@ -86,7 +97,7 @@ namespace Monospark
 
         void ParseFile(CancellationToken cancellationToken)
         {
-            using var reader = new StreamReader(FilePath);
+            using var reader = new StreamReader(FilePath, Encoding.UTF8, true, StreamBufferSize);
 
             string versionLine = reader.ReadLine();
             string title = reader.ReadLine();
@@ -105,6 +116,9 @@ namespace Monospark
             int[][] cellPointIndices = null;
             int[] cellTypes = null;
 
+            // Section header lines (a few dozen total, not the ~4M data rows)
+            // are rare enough that plain Split here costs nothing measurable —
+            // only the per-row parsers below are worth the span-based rewrite.
             string line;
             while ((line = reader.ReadLine()) != null)
             {
@@ -113,7 +127,7 @@ namespace Monospark
                 if (line.Length == 0)
                     continue;
 
-                string[] tokens = line.Split(Separators, StringSplitOptions.RemoveEmptyEntries);
+                string[] tokens = line.Split(' ', StringSplitOptions.RemoveEmptyEntries);
 
                 switch (tokens[0])
                 {
@@ -163,6 +177,51 @@ namespace Monospark
             _data = data;
         }
 
+        // Splits a line on ASCII spaces without allocating a string[] or any
+        // per-token strings (unlike string.Split) — yields slices of the
+        // original line instead. Across a ~4M-line file feeding ~9M Parse
+        // calls, this per-token allocation was the main parsing cost.
+        ref struct LineTokens
+        {
+            ReadOnlySpan<char> _remaining;
+
+            public LineTokens(ReadOnlySpan<char> line) => _remaining = line;
+
+            public bool TryNext(out ReadOnlySpan<char> token)
+            {
+                int start = 0;
+                while (start < _remaining.Length && _remaining[start] == ' ')
+                    start++;
+
+                if (start >= _remaining.Length)
+                {
+                    token = default;
+                    return false;
+                }
+
+                int end = start;
+                while (end < _remaining.Length && _remaining[end] != ' ')
+                    end++;
+
+                token = _remaining.Slice(start, end - start);
+                _remaining = _remaining.Slice(end);
+                return true;
+            }
+        }
+
+        static ReadOnlySpan<char> NextToken(ref LineTokens tokens)
+        {
+            if (!tokens.TryNext(out ReadOnlySpan<char> token))
+                throw new FormatException("Expected another token on this line.");
+            return token;
+        }
+
+        static float ParseFloat(ReadOnlySpan<char> token) =>
+            float.Parse(token, NumberStyles.Float, CultureInfo.InvariantCulture);
+
+        static int ParseInt(ReadOnlySpan<char> token) =>
+            int.Parse(token, NumberStyles.Integer, CultureInfo.InvariantCulture);
+
         List<Vector3> ReadPoints(StreamReader reader, int count, CancellationToken cancellationToken)
         {
             var result = new List<Vector3>(count);
@@ -170,11 +229,11 @@ namespace Monospark
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string rawLine = reader.ReadLine() ?? throw new EndOfStreamException("Unexpected end of file while reading POINTS.");
-                string[] tokens = rawLine.Split(Separators, StringSplitOptions.RemoveEmptyEntries);
-                result.Add(new Vector3(
-                    float.Parse(tokens[0], CultureInfo.InvariantCulture),
-                    float.Parse(tokens[1], CultureInfo.InvariantCulture),
-                    float.Parse(tokens[2], CultureInfo.InvariantCulture)));
+                var tokens = new LineTokens(rawLine.AsSpan());
+                float x = ParseFloat(NextToken(ref tokens));
+                float y = ParseFloat(NextToken(ref tokens));
+                float z = ParseFloat(NextToken(ref tokens));
+                result.Add(new Vector3(x, y, z));
             }
 
             Debug.Log($"[VtkUnstructuredGridReader] POINTS {count}");
@@ -191,12 +250,12 @@ namespace Monospark
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string rawLine = reader.ReadLine() ?? throw new EndOfStreamException("Unexpected end of file while reading CELLS.");
-                string[] tokens = rawLine.Split(Separators, StringSplitOptions.RemoveEmptyEntries);
-                int vertexCount = int.Parse(tokens[0], CultureInfo.InvariantCulture);
+                var tokens = new LineTokens(rawLine.AsSpan());
+                int vertexCount = ParseInt(NextToken(ref tokens));
 
                 var indices = new int[vertexCount];
                 for (int v = 0; v < vertexCount; v++)
-                    indices[v] = int.Parse(tokens[v + 1], CultureInfo.InvariantCulture);
+                    indices[v] = ParseInt(NextToken(ref tokens));
                 result[i] = indices;
             }
 
@@ -211,7 +270,7 @@ namespace Monospark
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string rawLine = reader.ReadLine() ?? throw new EndOfStreamException("Unexpected end of file while reading CELL_TYPES.");
-                types[i] = int.Parse(rawLine.Trim(), CultureInfo.InvariantCulture);
+                types[i] = ParseInt(rawLine.AsSpan().Trim());
             }
             return types;
         }
@@ -223,7 +282,7 @@ namespace Monospark
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string rawLine = reader.ReadLine() ?? throw new EndOfStreamException("Unexpected end of file while reading scalar data.");
-                values[i] = float.Parse(rawLine.Trim(), CultureInfo.InvariantCulture);
+                values[i] = ParseFloat(rawLine.AsSpan().Trim());
             }
             return values;
         }
@@ -235,11 +294,11 @@ namespace Monospark
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 string rawLine = reader.ReadLine() ?? throw new EndOfStreamException("Unexpected end of file while reading vector data.");
-                string[] tokens = rawLine.Split(Separators, StringSplitOptions.RemoveEmptyEntries);
-                values[i] = new Vector3(
-                    float.Parse(tokens[0], CultureInfo.InvariantCulture),
-                    float.Parse(tokens[1], CultureInfo.InvariantCulture),
-                    float.Parse(tokens[2], CultureInfo.InvariantCulture));
+                var tokens = new LineTokens(rawLine.AsSpan());
+                float x = ParseFloat(NextToken(ref tokens));
+                float y = ParseFloat(NextToken(ref tokens));
+                float z = ParseFloat(NextToken(ref tokens));
+                values[i] = new Vector3(x, y, z);
             }
             return values;
         }

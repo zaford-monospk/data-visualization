@@ -18,6 +18,7 @@ namespace Monospark
         
         public delegate void OnProcessTex3DData(Progress progress,Texture3D texture3D);
         public delegate void OnProcessBufferData(Progress progress,VtkUnstructuredGridData buffer);
+        public delegate void OnProcessFrameSequenceData(Progress progress,VtkFrameSequenceData sequence);
 
         public string FilePath { get; private set; }
 
@@ -28,5 +29,6 @@ namespace Monospark
 
         public abstract void BuildData(OnProcessTex3DData callback);
         public abstract void BuildData(OnProcessBufferData callback);
+        public abstract void BuildData(OnProcessFrameSequenceData callback);
     }
 }

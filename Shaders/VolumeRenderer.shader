@@ -3,11 +3,12 @@ Shader "Custom/VolumeRenderer"
     Properties
     {
         [MainTexture] _Volume("Volume", 3D) = "white" {}
-        _ColorCold("Cold Color", Color) = (0, 0.2, 1, 1)
-        _ColorHot("Hot Color", Color) = (1, 0.2, 0, 1)
+        _TemperatureLUT("Temp LUT", 2D) = "white" {}
         _DensityMultiplier("Density Multiplier", Range(0, 10)) = 1
         _StepCount("Step Count", Range(8, 256)) = 64
         _AlphaCutoff("Alpha Cutoff", Range(0, 1)) = 0.99
+        _ClipMin("Clip Range Min", Range(0, 1)) = 0
+        _ClipMax("Clip Range Max", Range(0, 1)) = 1
     }
 
     SubShader
@@ -26,6 +27,12 @@ Shader "Custom/VolumeRenderer"
             // this correct even when the camera is inside the cube.
             Cull Front
             ZWrite Off
+            // Always (not the default LEqual): with no ZTest, a single opaque
+            // object embedded inside the volume (e.g. a rack) would fail the
+            // depth test against the box's back face and blank out the whole
+            // ray at that pixel, not just the portion behind it. This makes
+            // the volume draw over everything in its screen footprint instead.
+            ZTest Always
             Blend SrcAlpha OneMinusSrcAlpha
 
             HLSLPROGRAM
@@ -36,13 +43,15 @@ Shader "Custom/VolumeRenderer"
 
             TEXTURE3D(_Volume);
             SAMPLER(sampler_Volume);
+            TEXTURE2D(_TemperatureLUT);
+            SAMPLER(sampler_TemperatureLUT);
 
             CBUFFER_START(UnityPerMaterial)
-                half4 _ColorCold;
-                half4 _ColorHot;
                 float _DensityMultiplier;
                 float _StepCount;
                 float _AlphaCutoff;
+                float _ClipMin;
+                float _ClipMax;
             CBUFFER_END
 
             struct Attributes
@@ -116,9 +125,18 @@ Shader "Custom/VolumeRenderer"
                     // data-dependent raymarch loop can't provide.
                     // r = normalized scalar value, a = voxel occupancy (0 where no data landed).
                     half2 volumeSample = SAMPLE_TEXTURE3D_LOD(_Volume, sampler_Volume, uv, 0).ra;
-                    half density = saturate(volumeSample.x * volumeSample.y * _DensityMultiplier);
 
-                    half3 sampleColor = lerp(_ColorCold.rgb, _ColorHot.rgb, volumeSample.x);
+                    // Value-range filter: samples outside [_ClipMin, _ClipMax]
+                    // contribute no density, so they're skipped rather than
+                    // blended in — isolates a band of the data instead of
+                    // discarding the whole ray (which would hide in-range
+                    // samples that happen to share a ray with out-of-range ones).
+                    half inRange = step(_ClipMin, volumeSample.x) * step(volumeSample.x, _ClipMax);
+                    half density = saturate(volumeSample.x * volumeSample.y * _DensityMultiplier) * inRange;
+
+                    // u = normalized scalar value, v = 0.5 (LUT used as a 1D ramp).
+                    half3 sampleColor = SAMPLE_TEXTURE2D_LOD(
+                        _TemperatureLUT, sampler_TemperatureLUT, float2(volumeSample.x, 0.5), 0).rgb;
                     half sampleAlpha = density * (1.0 - accumulatedAlpha);
 
                     accumulatedColor += sampleColor * sampleAlpha;

@@ -17,5 +17,12 @@ namespace Monospark
             converter.Init(filepath);
             converter.BuildData(tex3DData);
         }
+
+        public void GetMap<T>(DataConverter.OnProcessFrameSequenceData frameSequenceData, string filepath) where T : DataConverter, new()
+        {
+            var converter = new T();
+            converter.Init(filepath);
+            converter.BuildData(frameSequenceData);
+        }
     }
 }

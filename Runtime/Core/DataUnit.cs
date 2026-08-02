@@ -27,4 +27,43 @@ namespace Monospark
         public Dictionary<string, float[]> CellScalars = new Dictionary<string, float[]>();
         public Dictionary<string, Vector3[]> CellVectors = new Dictionary<string, Vector3[]>();
     }
+
+    // One frame of a voxelized temperature time-sequence: dims.x*dims.y*dims.z
+    // bytes, 0 = solid/empty voxel, 1..255 = temperature linearly encoded
+    // across [VtkFrameSequenceData.TempMin, TempMax].
+    public class VoxelTemperatureFrame
+    {
+        public byte[] Voxels;
+
+        public bool TryGetTemperature01(int voxelIndex, out float normalized01)
+        {
+            byte raw = Voxels[voxelIndex];
+            if (raw == 0)
+            {
+                normalized01 = 0f;
+                return false;
+            }
+            normalized01 = (raw - 1) / 254f;
+            return true;
+        }
+    }
+
+    // A voxelized time-sequence produced by Test/Generatives/make_frames.py
+    // from a source VtkUnstructuredGridData (e.g. room.vtk): frames.raw +
+    // frames_meta.json. Only temperature survives the voxelization — there's
+    // no per-frame cell connectivity, pressure, or velocity to carry over.
+    public class VtkFrameSequenceData : DataUnit
+    {
+        public Vector3Int Dims;
+        public float VoxelSize;
+        public Vector3 BoundsMin;
+        public Vector3 BoundsMax;
+        public float TempMin;
+        public float TempMax;
+        public float Fps;
+        public float Duration;
+        public int RackCount;
+        public string Source;
+        public VoxelTemperatureFrame[] Frames;
+    }
 }
