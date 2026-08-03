@@ -41,10 +41,13 @@ namespace Monospark
         const int IndirectDrawArgsStride = sizeof(uint) * 4;
         const int IndirectDrawIndexedArgsStride = sizeof(uint) * 5;
         static readonly int CellBufferId = Shader.PropertyToID("_CellBuffer");
+        static readonly int ObjectToWorldId = Shader.PropertyToID("_ObjectToWorld");
 
         GraphicsBuffer _cellBuffer;
         GraphicsBuffer _commandBuffer;
-        Bounds _bounds;
+        Bounds _localBounds;  // centered at origin — cell.Position is stored relative to this
+        Bounds _worldBounds;  // _localBounds transformed by _objectToWorld, kept in sync with it
+        Matrix4x4 _objectToWorld = Matrix4x4.identity;
         int _cellCount;
         bool _isVisible = true;
 
@@ -84,21 +87,35 @@ namespace Monospark
             float tempRange = Mathf.Max(tempMax - tempMin, Mathf.Epsilon);
             float pressRange = Mathf.Max(pressMax - pressMin, Mathf.Epsilon);
 
-            var instances = new CellInstance[_cellCount];
+            // Two passes: centroids/bounds first, then Position is stored
+            // relative to bounds.center — this renderer's own Transform is
+            // what actually places the (now-centered) data in the world, via
+            // _ObjectToWorld in Update(), rather than baking raw VTK world
+            // coordinates directly into the buffer.
+            var centroids = new Vector3[_cellCount];
             var bounds = new Bounds(data.Points.Length > 0 ? data.Points[0] : Vector3.zero, Vector3.zero);
             for (int i = 0; i < _cellCount; i++)
             {
-                Vector3 centroid = ComputeCentroid(data.Points, data.Cells[i]);
+                centroids[i] = ComputeCentroid(data.Points, data.Cells[i]);
+                bounds.Encapsulate(centroids[i]);
+            }
+            _localBounds = new Bounds(Vector3.zero, bounds.size);
+
+            var instances = new CellInstance[_cellCount];
+            for (int i = 0; i < _cellCount; i++)
+            {
                 instances[i] = new CellInstance
                 {
-                    Position = centroid,
+                    Position = centroids[i] - bounds.center,
                     Temperature = (temperatures[i] - tempMin) / tempRange,
                     Velocity = velocities[i],
                     Pressure = (pressures[i] - pressMin) / pressRange
                 };
-                bounds.Encapsulate(centroid);
             }
-            _bounds = bounds;
+
+            // Force a recompute on the next Update() even if the transform
+            // itself hasn't moved since last Set() — _localBounds just changed.
+            transform.hasChanged = true;
 
             ReleaseBuffers();
 
@@ -115,11 +132,26 @@ namespace Monospark
             if (!_isVisible || _cellBuffer == null || _commandBuffer == null || Material == null)
                 return;
 
+            // The expensive part — recomputing the matrix/world bounds from
+            // the Transform — only happens when it's actually moved. The
+            // Material calls below still run every frame regardless: Material
+            // is a shared asset (this prefab's Material reference isn't
+            // auto-instanced), so another renderer's Update() could have
+            // overwritten these properties since our last frame — cheap to
+            // just re-apply the cached values right before our own draw call.
+            if (transform.hasChanged)
+            {
+                _objectToWorld = transform.localToWorldMatrix;
+                _worldBounds = TransformBounds(_objectToWorld, _localBounds);
+                transform.hasChanged = false;
+            }
+
             Material.SetBuffer(CellBufferId, _cellBuffer);
+            Material.SetMatrix(ObjectToWorldId, _objectToWorld);
 
             var renderParams = new RenderParams(Material)
             {
-                worldBounds = _bounds,
+                worldBounds = _worldBounds,
                 shadowCastingMode = ShadowCastingMode.Off,
                 receiveShadows = false
             };
@@ -184,6 +216,27 @@ namespace Monospark
                 max = Mathf.Max(max, values[i]);
             }
             return (min, max);
+        }
+
+        // Conservative world-space AABB of a local AABB under an arbitrary
+        // (rotated/scaled) matrix: transform each half-extent axis and sum
+        // absolute components, rather than transforming and re-encapsulating
+        // all 8 corners.
+        static Bounds TransformBounds(Matrix4x4 matrix, Bounds localBounds)
+        {
+            Vector3 center = matrix.MultiplyPoint3x4(localBounds.center);
+            Vector3 extents = localBounds.extents;
+
+            Vector3 axisX = matrix.MultiplyVector(new Vector3(extents.x, 0, 0));
+            Vector3 axisY = matrix.MultiplyVector(new Vector3(0, extents.y, 0));
+            Vector3 axisZ = matrix.MultiplyVector(new Vector3(0, 0, extents.z));
+
+            Vector3 newExtents = new Vector3(
+                Mathf.Abs(axisX.x) + Mathf.Abs(axisY.x) + Mathf.Abs(axisZ.x),
+                Mathf.Abs(axisX.y) + Mathf.Abs(axisY.y) + Mathf.Abs(axisZ.y),
+                Mathf.Abs(axisX.z) + Mathf.Abs(axisY.z) + Mathf.Abs(axisZ.z));
+
+            return new Bounds(center, newExtents * 2f);
         }
 
         static Vector3 ComputeCentroid(Vector3[] points, VtkCell cell)

@@ -61,6 +61,13 @@ Shader "Custom/InstancedPointRender"
                 float _ClipMax;
             CBUFFER_END
             float _GlobalAlpha;
+
+            // Per-renderer (Material.SetMatrix from VtkUnstructuredGridRenderer.Update,
+            // only recomputed there when its Transform actually moves) — the
+            // whole cell buffer is stored local/centered, this places it in
+            // the world. Kept outside UnityPerMaterial, same reasoning as _GlobalAlpha.
+            float4x4 _ObjectToWorld;
+
             struct Attributes
             {
                 float4 positionOS : POSITION;
@@ -95,10 +102,13 @@ Shader "Custom/InstancedPointRender"
                 float pointSize = lerp(_MinPointSize, _MaxPointSize, saturate(cell.pressure));
                 float3 localOffset = OrientToVelocity(IN.positionOS.xyz * pointSize, forward);
 
-                // cell.position is the raw VTK coordinate, used directly as world
-                // space — this renderer doesn't yet apply its own GameObject
-                // transform (RenderMeshIndirect is driven purely from _CellBuffer).
-                float3 positionWS = cell.position + localOffset;
+                // cell.position is local (centered on the data's own bounds,
+                // set in VtkUnstructuredGridRenderer.Set) — combine with the
+                // glyph's own local offset, then place the whole thing in the
+                // world with one matrix, so moving/rotating/scaling this
+                // renderer's Transform moves the entire point cloud together.
+                float3 localPos = cell.position + localOffset;
+                float3 positionWS = mul(_ObjectToWorld, float4(localPos, 1)).xyz;
 
                 // Vertex stage can't take implicit derivatives, so this is an
                 // explicit-LOD lookup (LOD 0 — the LUT has no mips anyway).
