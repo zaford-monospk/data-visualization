@@ -99,8 +99,8 @@ Material:
     - _BumpScale: 1
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
-    - _ClipMax: 0.5
-    - _ClipMin: 0
+    - _ClipMax: 0.47777778
+    - _ClipMin: 0.044444446
     - _Cull: 2
     - _Cutoff: 0.5
     - _DensityMultiplier: 1

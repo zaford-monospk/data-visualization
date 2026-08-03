@@ -95,8 +95,8 @@ Material:
     - _BumpScale: 1
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
-    - _ClipMax: 0.653
-    - _ClipMin: 0.088
+    - _ClipMax: 0.65
+    - _ClipMin: 0.03888889
     - _Cull: 2
     - _Cutoff: 0.5
     - _DetailAlbedoMapScale: 1
@@ -104,13 +104,17 @@ Material:
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EnvironmentReflections: 1
-    - _GlobalAlpha: 1
+    - _GlobalAlpha: 0.163
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
-    - _MaxPointSize: 0.06
+    - _GlowFrequency: 2.31
+    - _GlowIntensity: 3
+    - _GlowSharpness: 18.3
+    - _GlowSpeed: 2
+    - _MaxPointSize: 0.1
     - _Metallic: 0
-    - _MinPointSize: 0.001
+    - _MinPointSize: 0.1
     - _OcclusionStrength: 1
     - _Parallax: 0.005
     - _PointSize: 0.05
@@ -122,6 +126,8 @@ Material:
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
     - _Surface: 0
+    - _VelocityClipMax: 0.8611111
+    - _VelocityClipMin: 0.039999984
     - _WorkflowMode: 1
     - _XRMotionVectorsPass: 1
     - _ZWrite: 1
@@ -131,6 +137,7 @@ Material:
     - _ColorCold: {r: 0, g: 0.19999996, b: 1, a: 1}
     - _ColorHot: {r: 1, g: 0.19999996, b: 0, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
+    - _GlowColor: {r: 0.39999998, g: 0.9, b: 1, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
   m_BuildTextureStacks: []
   m_AllowLocking: 1

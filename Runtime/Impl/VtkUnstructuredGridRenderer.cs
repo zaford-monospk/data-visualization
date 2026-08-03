@@ -42,6 +42,8 @@ namespace Monospark
         const int IndirectDrawIndexedArgsStride = sizeof(uint) * 5;
         static readonly int CellBufferId = Shader.PropertyToID("_CellBuffer");
         static readonly int ObjectToWorldId = Shader.PropertyToID("_ObjectToWorld");
+        static readonly int SpeedMinId = Shader.PropertyToID("_SpeedMin");
+        static readonly int SpeedMaxId = Shader.PropertyToID("_SpeedMax");
 
         GraphicsBuffer _cellBuffer;
         GraphicsBuffer _commandBuffer;
@@ -50,6 +52,11 @@ namespace Monospark
         Matrix4x4 _objectToWorld = Matrix4x4.identity;
         int _cellCount;
         bool _isVisible = true;
+        // Raw (unnormalized) speed range, so the shader can normalize
+        // length(cell.velocity) to 0..1 for its own _VelocityClipMin/Max filter
+        // the same way Temperature/Pressure are normalized here on the CPU.
+        float _speedMin;
+        float _speedMax;
 
         // There's no Renderer component to toggle here — Update() issues the
         // indirect draw call directly — so visibility just gates that call.
@@ -86,6 +93,11 @@ namespace Monospark
             (float pressMin, float pressMax) = MinMax(pressures, _cellCount);
             float tempRange = Mathf.Max(tempMax - tempMin, Mathf.Epsilon);
             float pressRange = Mathf.Max(pressMax - pressMin, Mathf.Epsilon);
+
+            var speeds = new float[_cellCount];
+            for (int i = 0; i < _cellCount; i++)
+                speeds[i] = velocities[i].magnitude;
+            (_speedMin, _speedMax) = MinMax(speeds, _cellCount);
 
             // Two passes: centroids/bounds first, then Position is stored
             // relative to bounds.center — this renderer's own Transform is
@@ -148,6 +160,8 @@ namespace Monospark
 
             Material.SetBuffer(CellBufferId, _cellBuffer);
             Material.SetMatrix(ObjectToWorldId, _objectToWorld);
+            Material.SetFloat(SpeedMinId, _speedMin);
+            Material.SetFloat(SpeedMaxId, _speedMax);
 
             var renderParams = new RenderParams(Material)
             {
