@@ -4,13 +4,19 @@ namespace Monospark
 {
     // Animates a VtkFrameSequenceData: each time playback advances to a new
     // source frame (paced by VtkFrameSequenceData.Fps, independent of render
-    // framerate), rebuilds a single persistent Texture3D in place (RGBAHalf:
+    // framerate), rebuilds a persistent Texture3D in place (RGBAHalf:
     // .r = normalized temperature, .a = voxel occupancy — same convention as
     // VtkUnstructuredGridReader.ToTexture3D) and pushes it onto Material's
-    // _Volume property, so it's compatible as-is with VolumeRenderer.shader.
+    // _Volume property. SetInterpolation switches on a second Texture3D
+    // (_VolumeNext) plus a per-render-frame _FrameBlend factor, for smooth
+    // playback via VolumeRenderer_Interpolate.shader specifically — off by
+    // default (cheap: one texture, rebuilt only ~Fps times/sec), since the
+    // extra texture only helps when the assigned shader actually reads it.
     public class VtkFrameSequencePlayer : MonoBehaviour , IRenderStateControl
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
+        static readonly int VolumeNextId = Shader.PropertyToID("_VolumeNext");
+        static readonly int FrameBlendId = Shader.PropertyToID("_FrameBlend");
 
         public Material Material;
         public Transform TargetCube; // optional: scaled to match voxel dims, as TestAction does for the static case
@@ -18,10 +24,12 @@ namespace Monospark
         public float PlaybackSpeed = 1f;
 
         VtkFrameSequenceData _sequence;
-        Texture3D _texture;
+        Texture3D _textureCurrent;
+        Texture3D _textureNext; // only allocated/maintained while interpolation is on
         Color[] _colorBuffer;
         float _elapsed;
         int _currentFrame = -1;
+        bool _interpolate;
 
         // TargetCube is what's actually drawn (a normal MeshRenderer), so
         // visibility toggles its Renderer directly — playback keeps running
@@ -49,9 +57,10 @@ namespace Monospark
         }
 
         // Swaps which shader variant this Material uses (e.g. VolumeRenderer.shader
-        // vs _BL vs _v2). Property values already set on Material (like _Volume,
-        // which every variant shares the same name for) carry over automatically —
-        // Unity keeps a Material's property sheet independent of its active shader.
+        // vs _BL vs _v2 vs _Interpolate). Property values already set on Material
+        // (like _Volume, which every variant shares the same name for) carry over
+        // automatically — Unity keeps a Material's property sheet independent of
+        // its active shader.
         public void SetShader(Shader shader)
         {
             if (Material != null && shader != null)
@@ -63,27 +72,70 @@ namespace Monospark
             return Material != null ? Material.shader : null;
         }
 
+        // Turning this on builds/maintains a second Texture3D (the next source
+        // frame) and a per-render-frame blend factor, for shaders that lerp
+        // between them (VolumeRenderer_Interpolate.shader). Turning it off
+        // resets the blend factor to 0 so an interpolate-capable shader falls
+        // back to showing _textureCurrent alone rather than a frozen stale mix.
+        public void SetInterpolation(bool enabled)
+        {
+            _interpolate = enabled;
+
+            if (!enabled)
+            {
+                if (Material != null)
+                    Material.SetFloat(FrameBlendId, 0f);
+                return;
+            }
+
+            if (_sequence == null || _sequence.Frames.Length == 0)
+                return;
+
+            UploadNextFrame(); // populate _VolumeNext immediately rather than waiting for the next frame tick
+        }
+
         public void Set(VtkFrameSequenceData sequence)
         {
             _sequence = sequence;
             _elapsed = 0f;
             _currentFrame = -1;
 
+            if (_textureNext != null)
+            {
+                Destroy(_textureNext);
+                _textureNext = null;
+            }
+
             Vector3Int dims = sequence.Dims;
-            _texture = new Texture3D(dims.x, dims.y, dims.z, TextureFormat.RGBAHalf, false)
+            _textureCurrent = CreateTexture(dims);
+            _colorBuffer = new Color[dims.x * dims.y * dims.z];
+
+            if (Material != null)
+                Material.SetTexture(VolumeId, _textureCurrent);
+            if (TargetCube != null)
+                TargetCube.localScale = new Vector3(dims.x, dims.y, dims.z) * _sequence.VoxelSize;
+
+            if (sequence.Frames.Length > 0)
+                ShowFrame(0);
+        }
+
+        static Texture3D CreateTexture(Vector3Int dims)
+        {
+            return new Texture3D(dims.x, dims.y, dims.z, TextureFormat.RGBAHalf, false)
             {
                 wrapMode = TextureWrapMode.Clamp,
                 filterMode = FilterMode.Bilinear
             };
-            _colorBuffer = new Color[dims.x * dims.y * dims.z];
+        }
 
+        void EnsureNextTexture()
+        {
+            if (_textureNext != null || _sequence == null)
+                return;
+
+            _textureNext = CreateTexture(_sequence.Dims);
             if (Material != null)
-                Material.SetTexture(VolumeId, _texture);
-            if (TargetCube != null)
-                TargetCube.localScale = new Vector3(dims.x, dims.y, dims.z)*_sequence.VoxelSize;
-
-            if (sequence.Frames.Length > 0)
-                ShowFrame(0);
+                Material.SetTexture(VolumeNextId, _textureNext);
         }
 
         void Update()
@@ -94,7 +146,8 @@ namespace Monospark
             _elapsed += Time.deltaTime * PlaybackSpeed;
 
             int frameCount = _sequence.Frames.Length;
-            int frame = Mathf.FloorToInt(_elapsed * _sequence.Fps);
+            float t = _elapsed * _sequence.Fps;
+            int frame = Mathf.FloorToInt(t);
 
             if (Loop)
             {
@@ -109,13 +162,38 @@ namespace Monospark
 
             if (frame != _currentFrame)
                 ShowFrame(frame);
+
+            // Fractional progress between _currentFrame and its successor —
+            // updated every render frame, unlike the textures themselves, so
+            // playback interpolates smoothly between the ~1/Fps-spaced source
+            // frames instead of jump-cutting at each frame boundary.
+            if (_interpolate && Material != null)
+                Material.SetFloat(FrameBlendId, Mathf.Repeat(t, 1f));
         }
 
         void ShowFrame(int frameIndex)
         {
             _currentFrame = frameIndex;
-            VoxelTemperatureFrame frame = _sequence.Frames[frameIndex];
+            UploadFrame(_sequence.Frames[frameIndex], _textureCurrent);
 
+            if (_interpolate)
+                UploadNextFrame();
+        }
+
+        void UploadNextFrame()
+        {
+            EnsureNextTexture();
+
+            int frameCount = _sequence.Frames.Length;
+            int nextIndex = Loop
+                ? (_currentFrame + 1) % frameCount
+                : Mathf.Min(_currentFrame + 1, frameCount - 1);
+
+            UploadFrame(_sequence.Frames[nextIndex], _textureNext);
+        }
+
+        void UploadFrame(VoxelTemperatureFrame frame, Texture3D texture)
+        {
             for (int i = 0; i < _colorBuffer.Length; i++)
             {
                 _colorBuffer[i] = frame.TryGetTemperature01(i, out float normalized)
@@ -123,14 +201,16 @@ namespace Monospark
                     : Color.clear;
             }
 
-            _texture.SetPixels(_colorBuffer);
-            _texture.Apply();
+            texture.SetPixels(_colorBuffer);
+            texture.Apply();
         }
 
         void OnDestroy()
         {
-            if (_texture != null)
-                Destroy(_texture);
+            if (_textureCurrent != null)
+                Destroy(_textureCurrent);
+            if (_textureNext != null)
+                Destroy(_textureNext);
         }
     }
 }

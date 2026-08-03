@@ -1,4 +1,3 @@
-using System;
 using UnityEngine;
 
 namespace Monospark
@@ -19,8 +18,7 @@ namespace Monospark
         public Vector3 VolumePlayerPosition;
         public Vector3 VolumePlayerEulerRotation;
         public Shader VolumeShaderOriginal;
-        public Shader VolumeShaderBL;
-        public Shader VolumeShaderV2;
+        public Shader VolumeShaderInterpolate;
 
         IRenderStateControl _gridRenderer;
         IRenderStateControl _volumePlayer;
@@ -34,10 +32,8 @@ namespace Monospark
         float _gridVelocityClipMax = 1f;
         float _volumeClipMin;
         float _volumeClipMax = 1f;
-        int _volumeShaderIndex;
+        bool _volumeInterpolate;
         bool _collapsed;
-
-        static readonly string[] VolumeShaderLabels = { "Original", "BL", "v2" };
 
         const float PanelWidth = 380f;
         const float PanelHeight = 700f;
@@ -125,38 +121,30 @@ namespace Monospark
                     // rather than assuming the slider defaults (0/1) match them.
                     _volumeClipMin = _volumePlayer.GetMaterialFloat("_ClipMin");
                     _volumeClipMax = _volumePlayer.GetMaterialFloat("_ClipMax");
-                    int matchedShaderIndex = Array.IndexOf(
-                        new Shader[] { VolumeShaderOriginal, VolumeShaderBL, VolumeShaderV2 }, _volumePlayer.GetShader());
-                    if (matchedShaderIndex >= 0)
-                        _volumeShaderIndex = matchedShaderIndex;
+                    _volumeInterpolate = false; // a freshly created player always starts non-interpolating
                 }
             }
             GUI.enabled = true;
 
             DrawVisibilityToggle(_volumePlayer, ref _volumePlayerVisible, _volumePlayerLoading);
 
-            GUILayout.Label("Shader");
-            Shader[] volumeShaders = { VolumeShaderOriginal, VolumeShaderBL, VolumeShaderV2 };
-            DrawShaderSelector(_volumePlayer, VolumeShaderLabels, volumeShaders, ref _volumeShaderIndex);
-
-            DrawClipRangeControls(_volumePlayer, "_ClipMin", "_ClipMax", ref _volumeClipMin, ref _volumeClipMax, 100f, "°C");
-        }
-
-        // GUILayout has no runtime dropdown (that's EditorGUILayout, editor-only)
-        // — SelectionGrid is the closest cross-platform equivalent.
-        static void DrawShaderSelector(IRenderStateControl control, string[] labels, Shader[] shaders, ref int selectedIndex)
-        {
-            GUI.enabled = control != null;
-            int newIndex = GUILayout.SelectionGrid(selectedIndex, labels, labels.Length);
-            if (newIndex != selectedIndex)
+            GUI.enabled = _volumePlayer != null;
+            if (GUILayout.Button(_volumeInterpolate ? "Interpolate: On" : "Interpolate: Off"))
             {
-                selectedIndex = newIndex;
-                Shader shader = shaders[selectedIndex];
+                _volumeInterpolate = !_volumeInterpolate;
+
+                // Only VolumeRenderer_Interpolate.shader reads _VolumeNext/_FrameBlend
+                // at all, so the toggle drives both the shader and the feature together.
+                Shader shader = _volumeInterpolate ? VolumeShaderInterpolate : VolumeShaderOriginal;
                 if (shader == null)
-                    Debug.LogWarning($"[TestUI] Shader slot '{labels[selectedIndex]}' isn't assigned in the Inspector — nothing changed.");
-                control?.SetShader(shader);
+                    Debug.LogWarning($"[TestUI] Volume Shader {(_volumeInterpolate ? "Interpolate" : "Original")} isn't assigned in the Inspector — shader not changed.");
+
+                _volumePlayer?.SetShader(shader);
+                _volumePlayer?.SetInterpolation(_volumeInterpolate);
             }
             GUI.enabled = true;
+
+            DrawClipRangeControls(_volumePlayer, "_ClipMin", "_ClipMax", ref _volumeClipMin, ref _volumeClipMax, 100f, "°C");
         }
 
         static void DrawVisibilityToggle(IRenderStateControl control, ref bool isVisible, bool loading)

@@ -92,6 +92,13 @@ namespace Monospark
             return Material != null ? Material.shader : null;
         }
 
+        // No-op here: this renders a single static snapshot, not a sequence
+        // of frames — there's nothing to interpolate between. Only
+        // VtkFrameSequencePlayer's implementation does anything.
+        public void SetInterpolation(bool enabled)
+        {
+        }
+
         public override void Set(DataUnit unit)
         {
             var data = (VtkUnstructuredGridData)unit;

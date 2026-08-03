@@ -9,5 +9,6 @@ namespace Monospark
         public float GetMaterialFloat(string property);
         public void SetShader(Shader shader);
         public Shader GetShader();
+        public void SetInterpolation(bool enabled);
     }
 }

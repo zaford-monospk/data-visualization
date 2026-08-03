@@ -3,6 +3,7 @@ Shader "Custom/VolumeRenderer_Interpolate"
     Properties
     {
         [MainTexture] _Volume("Volume", 3D) = "white" {}
+        _VolumeNext("Volume (next frame)", 3D) = "white" {}
         _TemperatureLUT("Temp LUT", 2D) = "white" {}
         _DensityMultiplier("Density Multiplier", Range(0, 10)) = 1
         _ExtinctionScale("Extinction Scale", Range(0, 500)) = 100
@@ -46,6 +47,8 @@ Shader "Custom/VolumeRenderer_Interpolate"
 
             TEXTURE3D(_Volume);
             SAMPLER(sampler_Volume);
+            TEXTURE3D(_VolumeNext);
+            SAMPLER(sampler_VolumeNext);
             TEXTURE2D(_TemperatureLUT);
             SAMPLER(sampler_TemperatureLUT);
 
@@ -58,6 +61,14 @@ Shader "Custom/VolumeRenderer_Interpolate"
                 float _ClipMax;
                 float _ClipSoftness;
             CBUFFER_END
+
+            // Per-renderer (Material.SetFloat from VtkFrameSequencePlayer.Update,
+            // only when interpolation is switched on — every render frame while
+            // it is, cheap unlike the textures themselves): fractional progress
+            // from _Volume's frame toward _VolumeNext's. Stays at 0 when
+            // interpolation is off, which makes the lerp below resolve to pure
+            // _Volume regardless of whatever _VolumeNext currently holds.
+            float _FrameBlend;
 
             struct Attributes
             {
@@ -213,7 +224,12 @@ Shader "Custom/VolumeRenderer_Interpolate"
                     // needs uniform control flow across a pixel quad, which a
                     // data-dependent raymarch loop can't provide.
                     // r = normalized scalar value, a = voxel occupancy/validity.
-                    float2 volumeSample = SAMPLE_TEXTURE3D_LOD(_Volume, sampler_Volume, uv, 0).ra;
+                    // Lerped against the next source frame (_FrameBlend) so
+                    // playback interpolates smoothly between the sequence's
+                    // discrete ~1/Fps-spaced frames instead of jump-cutting.
+                    float2 volumeSampleCurrent = SAMPLE_TEXTURE3D_LOD(_Volume, sampler_Volume, uv, 0).ra;
+                    float2 volumeSampleNext = SAMPLE_TEXTURE3D_LOD(_VolumeNext, sampler_VolumeNext, uv, 0).ra;
+                    float2 volumeSample = lerp(volumeSampleCurrent, volumeSampleNext, _FrameBlend);
                     float scalar = volumeSample.x;
                     float occupancy = volumeSample.y;
 

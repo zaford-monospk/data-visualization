@@ -53,3 +53,4 @@ MonoBehaviour:
   VolumeShaderOriginal: {fileID: 4800000, guid: 93103ee5bf89840c9b2558ad08d1ea93, type: 3}
   VolumeShaderBL: {fileID: 4800000, guid: acaef9bd2a3ff4927a418ad4b5d3d584, type: 3}
   VolumeShaderV2: {fileID: 4800000, guid: a87a1db88c43142dea58a351dd2916af, type: 3}
+  VolumeShaderInterpolate: {fileID: 4800000, guid: a87a1db88c43142dea58a351dd2916af, type: 3}
