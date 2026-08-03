@@ -8,7 +8,7 @@ namespace Monospark
     // .r = normalized temperature, .a = voxel occupancy — same convention as
     // VtkUnstructuredGridReader.ToTexture3D) and pushes it onto Material's
     // _Volume property, so it's compatible as-is with VolumeRenderer.shader.
-    public class VtkFrameSequencePlayer : MonoBehaviour
+    public class VtkFrameSequencePlayer : MonoBehaviour , IRenderStateControl
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
 
@@ -22,6 +22,26 @@ namespace Monospark
         Color[] _colorBuffer;
         float _elapsed;
         int _currentFrame = -1;
+
+        // TargetCube is what's actually drawn (a normal MeshRenderer), so
+        // visibility toggles its Renderer directly — playback keeps running
+        // underneath (the texture stays current for whenever it's shown again).
+        public void SetVisibility(bool isVisible)
+        {
+            if (TargetCube != null && TargetCube.TryGetComponent<Renderer>(out var cubeRenderer))
+                cubeRenderer.enabled = isVisible;
+        }
+
+        // Returns the property's previous value, so callers can restore it later.
+        public float SetMaterialFloat(string property, float value)
+        {
+            if (Material == null)
+                return 0f;
+
+            float previous = Material.GetFloat(property);
+            Material.SetFloat(property, value);
+            return previous;
+        }
 
         public void Set(VtkFrameSequenceData sequence)
         {

@@ -13,7 +13,7 @@ namespace Monospark
     // synthesized in the vertex shader from _CellBuffer via SV_VertexID) or
     // RenderMeshIndirect for an instanced mesh glyph per cell (SV_InstanceID
     // indexes _CellBuffer to offset/scale/rotate InstanceMesh per copy).
-    public class VtkUnstructuredGridRenderer : StructuredBufferRenderer
+    public class VtkUnstructuredGridRenderer : StructuredBufferRenderer , IRenderStateControl
     {
         public enum eRenderType
         {
@@ -46,6 +46,25 @@ namespace Monospark
         GraphicsBuffer _commandBuffer;
         Bounds _bounds;
         int _cellCount;
+        bool _isVisible = true;
+
+        // There's no Renderer component to toggle here — Update() issues the
+        // indirect draw call directly — so visibility just gates that call.
+        public void SetVisibility(bool isVisible)
+        {
+            _isVisible = isVisible;
+        }
+
+        // Returns the property's previous value, so callers can restore it later.
+        public float SetMaterialFloat(string property, float value)
+        {
+            if (Material == null)
+                return 0f;
+
+            float previous = Material.GetFloat(property);
+            Material.SetFloat(property, value);
+            return previous;
+        }
 
         public override void Set(DataUnit unit)
         {
@@ -93,7 +112,7 @@ namespace Monospark
 
         void Update()
         {
-            if (_cellBuffer == null || _commandBuffer == null || Material == null)
+            if (!_isVisible || _cellBuffer == null || _commandBuffer == null || Material == null)
                 return;
 
             Material.SetBuffer(CellBufferId, _cellBuffer);
