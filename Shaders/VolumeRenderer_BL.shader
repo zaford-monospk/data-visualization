@@ -1,10 +1,11 @@
-Shader "Custom/VolumeRenderer"
+Shader "Custom/VolumeRenderer_BL"
 {
     Properties
     {
         [MainTexture] _Volume("Volume", 3D) = "white" {}
         _TemperatureLUT("Temp LUT", 2D) = "white" {}
         _DensityMultiplier("Density Multiplier", Range(0, 10)) = 1
+        _ExtinctionCoefficient("Extinction Coefficient", Range(0, 20)) = 4
         _StepCount("Step Count", Range(8, 256)) = 64
         _AlphaCutoff("Alpha Cutoff", Range(0, 1)) = 0.99
         _ClipMin("Clip Range Min", Range(0, 1)) = 0
@@ -49,6 +50,7 @@ Shader "Custom/VolumeRenderer"
 
             CBUFFER_START(UnityPerMaterial)
                 float _DensityMultiplier;
+                float _ExtinctionCoefficient;
                 float _StepCount;
                 float _AlphaCutoff;
                 float _ClipMin;
@@ -156,9 +158,14 @@ Shader "Custom/VolumeRenderer"
                 float3 samplePos = rayOriginOS + rayDirOS * (dstToBox + jitter);
 
                 half3 accumulatedColor = 0;
-                half accumulatedAlpha = 0;
+                // Fraction of light that still makes it through everything
+                // traversed so far, front-to-back. Beer's law (exponential
+                // extinction per step) instead of a linear alpha blend — falls
+                // off smoothly rather than banding, and reads far less noisy
+                // at the same _StepCount.
+                half transmittance = 1.0;
 
-                for (int i = 0; i < steps && accumulatedAlpha < _AlphaCutoff; i++)
+                for (int i = 0; i < steps && (1.0 - transmittance) < _AlphaCutoff; i++)
                 {
                     float3 uv = samplePos + 0.5;
                     // Explicit LOD (not SAMPLE_TEXTURE3D): implicit-gradient sampling
@@ -178,15 +185,20 @@ Shader "Custom/VolumeRenderer"
                     // u = normalized scalar value, v = 0.5 (LUT used as a 1D ramp).
                     half3 sampleColor = SAMPLE_TEXTURE2D_LOD(
                         _TemperatureLUT, sampler_TemperatureLUT, float2(volumeSample.x, 0.5), 0).rgb;
-                    half sampleAlpha = density * (1.0 - accumulatedAlpha);
 
-                    accumulatedColor += sampleColor * sampleAlpha;
-                    accumulatedAlpha += sampleAlpha;
+                    // exp(-absorption) = fraction of light that survives this
+                    // step; 1 minus that is how much this sample contributes,
+                    // weighted by how much light was left to absorb.
+                    half sampleTransmittance = exp(-density * stepSize * _ExtinctionCoefficient);
+                    half sampleAlpha = 1.0 - sampleTransmittance;
+
+                    accumulatedColor += sampleColor * sampleAlpha * transmittance;
+                    transmittance *= sampleTransmittance;
 
                     samplePos += rayDirOS * stepSize;
                 }
 
-                return half4(accumulatedColor, accumulatedAlpha);
+                return half4(accumulatedColor, 1.0 - transmittance);
             }
             ENDHLSL
         }

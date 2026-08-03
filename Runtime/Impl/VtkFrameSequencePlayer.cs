@@ -43,6 +43,26 @@ namespace Monospark
             return previous;
         }
 
+        public float GetMaterialFloat(string property)
+        {
+            return Material != null ? Material.GetFloat(property) : 0f;
+        }
+
+        // Swaps which shader variant this Material uses (e.g. VolumeRenderer.shader
+        // vs _BL vs _v2). Property values already set on Material (like _Volume,
+        // which every variant shares the same name for) carry over automatically —
+        // Unity keeps a Material's property sheet independent of its active shader.
+        public void SetShader(Shader shader)
+        {
+            if (Material != null && shader != null)
+                Material.shader = shader;
+        }
+
+        public Shader GetShader()
+        {
+            return Material != null ? Material.shader : null;
+        }
+
         public void Set(VtkFrameSequenceData sequence)
         {
             _sequence = sequence;

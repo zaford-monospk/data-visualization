@@ -1,3 +1,4 @@
+using System;
 using UnityEngine;
 
 namespace Monospark
@@ -17,6 +18,9 @@ namespace Monospark
         public string VolumePlayerDataPath;
         public Vector3 VolumePlayerPosition;
         public Vector3 VolumePlayerEulerRotation;
+        public Shader VolumeShaderOriginal;
+        public Shader VolumeShaderBL;
+        public Shader VolumeShaderV2;
 
         IRenderStateControl _gridRenderer;
         IRenderStateControl _volumePlayer;
@@ -30,17 +34,34 @@ namespace Monospark
         float _gridVelocityClipMax = 1f;
         float _volumeClipMin;
         float _volumeClipMax = 1f;
+        int _volumeShaderIndex;
+        bool _collapsed;
+
+        static readonly string[] VolumeShaderLabels = { "Original", "BL", "v2" };
+
+        const float PanelWidth = 380f;
+        const float PanelHeight = 700f;
+        const float HeaderHeight = 30f;
 
         void OnGUI()
         {
-            GUILayout.BeginArea(new Rect(10, 10, 380, 640), GUI.skin.box);
+            float height = _collapsed ? HeaderHeight : PanelHeight;
+            GUILayout.BeginArea(new Rect(10, 10, PanelWidth, height), GUI.skin.box);
 
+            GUILayout.BeginHorizontal();
             GUILayout.Label("CFD Test UI");
-            GUILayout.Space(6);
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button(_collapsed ? "+" : "-", GUILayout.Width(24)))
+                _collapsed = !_collapsed;
+            GUILayout.EndHorizontal();
 
-            DrawGridRendererSection();
-            GUILayout.Space(12);
-            DrawVolumePlayerSection();
+            if (!_collapsed)
+            {
+                GUILayout.Space(6);
+                DrawGridRendererSection();
+                GUILayout.Space(12);
+                DrawVolumePlayerSection();
+            }
 
             GUILayout.EndArea();
         }
@@ -64,6 +85,12 @@ namespace Monospark
                         Application.dataPath + GridRendererDataPath, GridRendererPosition, Quaternion.Euler(GridRendererEulerRotation),
                         _ => _gridRendererLoading = false);
                     _gridRendererVisible = true;
+                    // Read the prefab-configured material's actual current values
+                    // rather than assuming the slider defaults (0/1) match them.
+                    _gridClipMin = _gridRenderer.GetMaterialFloat("_ClipMin");
+                    _gridClipMax = _gridRenderer.GetMaterialFloat("_ClipMax");
+                    _gridVelocityClipMin = _gridRenderer.GetMaterialFloat("_VelocityClipMin");
+                    _gridVelocityClipMax = _gridRenderer.GetMaterialFloat("_VelocityClipMax");
                 }
             }
             GUI.enabled = true;
@@ -94,12 +121,42 @@ namespace Monospark
                         Application.dataPath + VolumePlayerDataPath, VolumePlayerPosition, Quaternion.Euler(VolumePlayerEulerRotation),
                         _ => _volumePlayerLoading = false);
                     _volumePlayerVisible = true;
+                    // Read the prefab-configured material's actual current values
+                    // rather than assuming the slider defaults (0/1) match them.
+                    _volumeClipMin = _volumePlayer.GetMaterialFloat("_ClipMin");
+                    _volumeClipMax = _volumePlayer.GetMaterialFloat("_ClipMax");
+                    int matchedShaderIndex = Array.IndexOf(
+                        new Shader[] { VolumeShaderOriginal, VolumeShaderBL, VolumeShaderV2 }, _volumePlayer.GetShader());
+                    if (matchedShaderIndex >= 0)
+                        _volumeShaderIndex = matchedShaderIndex;
                 }
             }
             GUI.enabled = true;
 
             DrawVisibilityToggle(_volumePlayer, ref _volumePlayerVisible, _volumePlayerLoading);
+
+            GUILayout.Label("Shader");
+            Shader[] volumeShaders = { VolumeShaderOriginal, VolumeShaderBL, VolumeShaderV2 };
+            DrawShaderSelector(_volumePlayer, VolumeShaderLabels, volumeShaders, ref _volumeShaderIndex);
+
             DrawClipRangeControls(_volumePlayer, "_ClipMin", "_ClipMax", ref _volumeClipMin, ref _volumeClipMax, 100f, "°C");
+        }
+
+        // GUILayout has no runtime dropdown (that's EditorGUILayout, editor-only)
+        // — SelectionGrid is the closest cross-platform equivalent.
+        static void DrawShaderSelector(IRenderStateControl control, string[] labels, Shader[] shaders, ref int selectedIndex)
+        {
+            GUI.enabled = control != null;
+            int newIndex = GUILayout.SelectionGrid(selectedIndex, labels, labels.Length);
+            if (newIndex != selectedIndex)
+            {
+                selectedIndex = newIndex;
+                Shader shader = shaders[selectedIndex];
+                if (shader == null)
+                    Debug.LogWarning($"[TestUI] Shader slot '{labels[selectedIndex]}' isn't assigned in the Inspector — nothing changed.");
+                control?.SetShader(shader);
+            }
+            GUI.enabled = true;
         }
 
         static void DrawVisibilityToggle(IRenderStateControl control, ref bool isVisible, bool loading)

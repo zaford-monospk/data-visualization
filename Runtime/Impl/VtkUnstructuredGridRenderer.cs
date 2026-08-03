@@ -76,6 +76,22 @@ namespace Monospark
             return previous;
         }
 
+        public float GetMaterialFloat(string property)
+        {
+            return Material != null ? Material.GetFloat(property) : 0f;
+        }
+
+        public void SetShader(Shader shader)
+        {
+            if (Material != null && shader != null)
+                Material.shader = shader;
+        }
+
+        public Shader GetShader()
+        {
+            return Material != null ? Material.shader : null;
+        }
+
         public override void Set(DataUnit unit)
         {
             var data = (VtkUnstructuredGridData)unit;
