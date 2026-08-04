@@ -1,4 +1,8 @@
+using System.IO;
 using UnityEngine;
+#if UNITY_EDITOR
+using UnityEditor;
+#endif
 
 namespace Monospark
 {
@@ -8,17 +12,32 @@ namespace Monospark
     // decoupled control surface a real UI would use.
     public class TestUI : MonoBehaviour
     {
+        enum PathMode
+        {
+            Assets,          // Application.dataPath + a "/Resources/..."-style suffix
+            StreamingAssets, // Application.streamingAssetsPath + suffix
+            Disk             // an absolute path anywhere on disk, outside the project
+        }
+
+        static readonly string[] PathModeLabels = { "Assets", "StreamingAssets", "Disk" };
+
         [Header("Grid Renderer (instanced)")]
-        public string GridRendererDataPath;
         public Vector3 GridRendererPosition;
         public Vector3 GridRendererEulerRotation;
 
         [Header("Volume Player (raymarch)")]
-        public string VolumePlayerDataPath;
         public Vector3 VolumePlayerPosition;
         public Vector3 VolumePlayerEulerRotation;
         public Shader VolumeShaderOriginal;
         public Shader VolumeShaderInterpolate;
+
+        // Not Inspector-exposed: these are edited live via the GUI's own text
+        // field, so a stale/wrong Inspector value could never end up silently
+        // in use — the field always reflects exactly what's on screen.
+        string _gridRendererDataPath = "";
+        string _volumePlayerDataPath = "";
+        PathMode _gridPathMode;
+        PathMode _volumePathMode;
 
         IRenderStateControl _gridRenderer;
         IRenderStateControl _volumePlayer;
@@ -26,6 +45,8 @@ namespace Monospark
         bool _volumePlayerVisible = true;
         bool _gridRendererLoading;
         bool _volumePlayerLoading;
+        string _gridPathError;
+        string _volumePathError;
         float _gridClipMin;
         float _gridClipMax = 1f;
         float _gridVelocityClipMin;
@@ -36,8 +57,10 @@ namespace Monospark
         bool _collapsed;
 
         const float PanelWidth = 380f;
-        const float PanelHeight = 700f;
+        const float PanelHeight = 820f;
         const float HeaderHeight = 30f;
+
+        static GUIStyle _errorStyle;
 
         void OnGUI()
         {
@@ -66,6 +89,12 @@ namespace Monospark
         {
             GUILayout.Label("Grid Renderer (instanced)" + (_gridRendererLoading ? " (loading...)" : ""));
 
+            _gridRendererDataPath = GUILayout.TextField(_gridRendererDataPath);
+            _gridPathMode = (PathMode)GUILayout.SelectionGrid((int)_gridPathMode, PathModeLabels, PathModeLabels.Length);
+
+            if (_gridPathMode == PathMode.Disk)
+                DrawBrowseButton(isFolder: false, "Select VTK File", "vtk", path => _gridRendererDataPath = path);
+
             GUI.enabled = !_gridRendererLoading;
             if (GUILayout.Button("Create"))
             {
@@ -73,12 +102,17 @@ namespace Monospark
                 {
                     Debug.LogError("[TestUI] No CFDFactory in scene.");
                 }
+                else if (!TryResolvePath(_gridRendererDataPath, _gridPathMode, isDirectory: false,
+                             out string resolvedPath, out _gridPathError))
+                {
+                    Debug.LogWarning($"[TestUI] {_gridPathError}");
+                }
                 else
                 {
                     DestroyIfExists(_gridRenderer);
                     _gridRendererLoading = true;
                     _gridRenderer = CFDFactory.Instance.CreateGridRenderer(
-                        Application.dataPath + GridRendererDataPath, GridRendererPosition, Quaternion.Euler(GridRendererEulerRotation),
+                        resolvedPath, GridRendererPosition, Quaternion.Euler(GridRendererEulerRotation),
                         _ => _gridRendererLoading = false);
                     _gridRendererVisible = true;
                     // Read the prefab-configured material's actual current values
@@ -91,6 +125,9 @@ namespace Monospark
             }
             GUI.enabled = true;
 
+            if (!string.IsNullOrEmpty(_gridPathError))
+                GUILayout.Label(_gridPathError, ErrorStyle());
+
             DrawVisibilityToggle(_gridRenderer, ref _gridRendererVisible, _gridRendererLoading);
             GUILayout.Label("Temperature");
             DrawClipRangeControls(_gridRenderer, "_ClipMin", "_ClipMax", ref _gridClipMin, ref _gridClipMax, 100f, "°C");
@@ -102,6 +139,12 @@ namespace Monospark
         {
             GUILayout.Label("Volume Player (raymarch)" + (_volumePlayerLoading ? " (loading...)" : ""));
 
+            _volumePlayerDataPath = GUILayout.TextField(_volumePlayerDataPath);
+            _volumePathMode = (PathMode)GUILayout.SelectionGrid((int)_volumePathMode, PathModeLabels, PathModeLabels.Length);
+
+            if (_volumePathMode == PathMode.Disk)
+                DrawBrowseButton(isFolder: true, "Select Frame Sequence Folder", null, path => _volumePlayerDataPath = path);
+
             GUI.enabled = !_volumePlayerLoading;
             if (GUILayout.Button("Create"))
             {
@@ -109,12 +152,20 @@ namespace Monospark
                 {
                     Debug.LogError("[TestUI] No CFDFactory in scene.");
                 }
+                // VtkFrameSequenceReader.FilePath is a directory (frames.raw +
+                // frames_meta.json live inside it), unlike the grid renderer's
+                // single-file path — hence isDirectory: true here.
+                else if (!TryResolvePath(_volumePlayerDataPath, _volumePathMode, isDirectory: true,
+                             out string resolvedPath, out _volumePathError))
+                {
+                    Debug.LogWarning($"[TestUI] {_volumePathError}");
+                }
                 else
                 {
                     DestroyIfExists(_volumePlayer);
                     _volumePlayerLoading = true;
                     _volumePlayer = CFDFactory.Instance.CreateVolumePlayer(
-                        Application.dataPath + VolumePlayerDataPath, VolumePlayerPosition, Quaternion.Euler(VolumePlayerEulerRotation),
+                        resolvedPath, VolumePlayerPosition, Quaternion.Euler(VolumePlayerEulerRotation),
                         _ => _volumePlayerLoading = false);
                     _volumePlayerVisible = true;
                     // Read the prefab-configured material's actual current values
@@ -125,6 +176,9 @@ namespace Monospark
                 }
             }
             GUI.enabled = true;
+
+            if (!string.IsNullOrEmpty(_volumePathError))
+                GUILayout.Label(_volumePathError, ErrorStyle());
 
             DrawVisibilityToggle(_volumePlayer, ref _volumePlayerVisible, _volumePlayerLoading);
 
@@ -145,6 +199,57 @@ namespace Monospark
             GUI.enabled = true;
 
             DrawClipRangeControls(_volumePlayer, "_ClipMin", "_ClipMax", ref _volumeClipMin, ref _volumeClipMax, 100f, "°C");
+        }
+
+        // Editor-only: there's no cross-platform runtime file/folder picker
+        // without a native plugin, and this panel is an Editor testing tool.
+        // Compiles out entirely in player builds.
+        static void DrawBrowseButton(bool isFolder, string title, string extension, System.Action<string> onPicked)
+        {
+#if UNITY_EDITOR
+            if (GUILayout.Button("Browse..."))
+            {
+                string picked = isFolder
+                    ? EditorUtility.OpenFolderPanel(title, Application.dataPath, "")
+                    : EditorUtility.OpenFilePanel(title, Application.dataPath, extension);
+
+                if (!string.IsNullOrEmpty(picked))
+                    onPicked(picked);
+            }
+#endif
+        }
+
+        // Assets/StreamingAssets modes resolve pathSuffix against a project
+        // base folder (same platform caveat as DataConverter.InitFromStreamingAssets:
+        // works on Desktop/Editor/iOS, not Android/WebGL); Disk mode treats it as
+        // an already-absolute path picked via Browse (or typed) and uses it as-is.
+        // Either way, checks the resolved path actually exists before the caller
+        // hands it to CFDFactory, rather than finding out from a failed async load.
+        static bool TryResolvePath(string pathSuffix, PathMode mode, bool isDirectory, out string resolvedPath, out string error)
+        {
+            switch (mode)
+            {
+                case PathMode.StreamingAssets:
+                    resolvedPath = Path.Combine(Application.streamingAssetsPath, pathSuffix.TrimStart('/', '\\'));
+                    break;
+                case PathMode.Disk:
+                    resolvedPath = pathSuffix;
+                    break;
+                default:
+                    resolvedPath = Application.dataPath + pathSuffix;
+                    break;
+            }
+
+            bool exists = isDirectory ? Directory.Exists(resolvedPath) : File.Exists(resolvedPath);
+            error = exists ? null : $"{(isDirectory ? "Directory" : "File")} not found:\n{resolvedPath}";
+            return exists;
+        }
+
+        static GUIStyle ErrorStyle()
+        {
+            if (_errorStyle == null)
+                _errorStyle = new GUIStyle(GUI.skin.label) { normal = { textColor = Color.red }, wordWrap = true };
+            return _errorStyle;
         }
 
         static void DrawVisibilityToggle(IRenderStateControl control, ref bool isVisible, bool loading)

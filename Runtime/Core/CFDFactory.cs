@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using UnityEngine;
 
 namespace Monospark
@@ -55,6 +56,17 @@ namespace Monospark
             return gridRenderer;
         }
 
+        // Same as CreateGridRenderer, but relativePath is resolved against
+        // Application.streamingAssetsPath (see DataConverter.InitFromStreamingAssets
+        // for the same platform caveat: works on Desktop/Editor/iOS, not
+        // Android/WebGL, since the reader underneath uses plain File I/O).
+        public VtkUnstructuredGridRenderer CreateGridRendererFromStreamingAssets(
+            string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null)
+        {
+            return CreateGridRenderer(
+                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete);
+        }
+
         // Instances _CFDVolume/VolumePlayer (pre-wired with a Material + child
         // Cube as TargetCube) at worldPosition/rotation, then starts loading
         // dataPath's voxelized time sequence into it — VtkFrameSequencePlayer
@@ -85,6 +97,17 @@ namespace Monospark
 
             instance.AddComponent<DataConvertManager>().GetMap<VtkFrameSequenceReader>(OnSequenceReady, dataPath);
             return player;
+        }
+
+        // Same as CreateVolumePlayer, but relativePath is resolved against
+        // Application.streamingAssetsPath (see DataConverter.InitFromStreamingAssets
+        // for the same platform caveat: works on Desktop/Editor/iOS, not
+        // Android/WebGL, since the reader underneath uses plain File I/O).
+        public VtkFrameSequencePlayer CreateVolumePlayerFromStreamingAssets(
+            string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null)
+        {
+            return CreateVolumePlayer(
+                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete);
         }
 
         static GameObject InstantiatePrefab(string resourcePath, Vector3 worldPosition, Quaternion rotation)

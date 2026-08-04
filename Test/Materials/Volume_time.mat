@@ -8,7 +8,7 @@ Material:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_Name: Volume_time
-  m_Shader: {fileID: 4800000, guid: 87f415973097a4df5b12599aaaca6c72, type: 3}
+  m_Shader: {fileID: 4800000, guid: 93103ee5bf89840c9b2558ad08d1ea93, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []
@@ -103,8 +103,8 @@ Material:
     - _BumpScale: 1
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
-    - _ClipMax: 0.48333332
-    - _ClipMin: 0.03888889
+    - _ClipMax: 0.46111113
+    - _ClipMin: 0.027777778
     - _ClipSoftness: 0.0147
     - _Cull: 2
     - _Cutoff: 0.5
