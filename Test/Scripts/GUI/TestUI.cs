@@ -140,7 +140,14 @@ namespace Monospark
             GUILayout.Label("Volume Player (raymarch)" + (_volumePlayerLoading ? " (loading...)" : ""));
 
             _volumePlayerDataPath = GUILayout.TextField(_volumePlayerDataPath);
-            _volumePathMode = (PathMode)GUILayout.SelectionGrid((int)_volumePathMode, PathModeLabels, PathModeLabels.Length);
+
+            PathMode newVolumePathMode = (PathMode)GUILayout.SelectionGrid((int)_volumePathMode, PathModeLabels, PathModeLabels.Length);
+            if (newVolumePathMode != _volumePathMode)
+            {
+                _volumePathMode = newVolumePathMode;
+                if (_volumePathMode == PathMode.StreamingAssets)
+                    _volumePlayerDataPath = "/CFDDatas/Timestep/0";
+            }
 
             if (_volumePathMode == PathMode.Disk)
                 DrawBrowseButton(isFolder: true, "Select Frame Sequence Folder", null, path => _volumePlayerDataPath = path);
