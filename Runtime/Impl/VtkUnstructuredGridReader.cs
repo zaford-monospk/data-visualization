@@ -23,6 +23,30 @@ namespace Monospark
 
         public string FieldName { get; set; } = "Temperature(C)";
 
+        // When true (default), every CELL_DATA section (each SCALARS/VECTORS
+        // field) is parsed and cached in _data, so a later
+        // BuildData(OnProcessBufferData) call has everything. Set to false
+        // when this instance will only ever be asked for FieldName's
+        // Texture3D (e.g. VtkFrameReader's internal use) -- every OTHER
+        // SCALARS/VECTORS section is then skipped (ReadLine()'d past without
+        // tokenizing/parsing/allocating), which for a file with several
+        // per-cell fields (room.vtk: Temperature + Pressure + Velocity) is a
+        // large chunk of the total parse that a Texture3D-only caller never
+        // uses anyway.
+        public bool ParseAllFields { get; set; } = true;
+
+        // Which axis the file's raw X/Y/Z treats as "up" -- see WorldUpAxis.
+        // Applied to every POINTS and VECTORS value as it's parsed, so
+        // downstream (bounds, cell centroids, voxelization) only ever sees
+        // Unity-space coordinates.
+        public WorldUpAxis WorldUp { get; set; } = WorldUpAxis.Y;
+
+        // Physical bounds (world units) of the parsed POINTS -- valid once
+        // BuildData's callback has fired with SUCCESS. Lets callers (e.g.
+        // VtkFrameReader) size a display proxy to the data's actual
+        // real-world extents instead of guessing from voxel-grid resolution.
+        public Vector3 Size => _bounds.size;
+
         int _cellCount;
         Bounds _bounds;
         Vector3[] _cellCentroids;
@@ -154,6 +178,11 @@ namespace Monospark
                     case "SCALARS":
                         string scalarField = tokens[1];
                         reader.ReadLine(); // LOOKUP_TABLE <name>
+                        if (!ParseAllFields && scalarField != FieldName)
+                        {
+                            SkipLines(reader, _cellCount, cancellationToken);
+                            break;
+                        }
                         float[] scalarValues = ReadScalars(reader, _cellCount, cancellationToken);
                         data.CellScalars[scalarField] = scalarValues;
                         Debug.Log($"[VtkUnstructuredGridReader] SCALARS {scalarField} ({scalarValues.Length} cells)");
@@ -162,6 +191,11 @@ namespace Monospark
 
                     case "VECTORS":
                         string vectorField = tokens[1];
+                        if (!ParseAllFields)
+                        {
+                            SkipLines(reader, _cellCount, cancellationToken);
+                            break;
+                        }
                         Vector3[] vectorValues = ReadVectors(reader, _cellCount, cancellationToken);
                         data.CellVectors[vectorField] = vectorValues;
                         Debug.Log($"[VtkUnstructuredGridReader] VECTORS {vectorField} ({vectorValues.Length} cells)");
@@ -233,7 +267,7 @@ namespace Monospark
                 float x = ParseFloat(NextToken(ref tokens));
                 float y = ParseFloat(NextToken(ref tokens));
                 float z = ParseFloat(NextToken(ref tokens));
-                result.Add(new Vector3(x, y, z));
+                result.Add(WorldUp.ToUnity(new Vector3(x, y, z)));
             }
 
             Debug.Log($"[VtkUnstructuredGridReader] POINTS {count}");
@@ -241,6 +275,19 @@ namespace Monospark
                 Debug.Log($"  [{i}] {result[i].x:F4} {result[i].y:F4} {result[i].z:F4}");
 
             return result;
+        }
+
+        // Advances past `count` lines without tokenizing/parsing/allocating --
+        // used by ParseAllFields = false to discard a SCALARS/VECTORS section
+        // this instance was never going to read, far cheaper per line than
+        // ReadScalars/ReadVectors since there's no float.Parse or array write.
+        static void SkipLines(StreamReader reader, int count, CancellationToken cancellationToken)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                reader.ReadLine();
+            }
         }
 
         static int[][] ReadCellPointIndices(StreamReader reader, int count, CancellationToken cancellationToken)
@@ -287,7 +334,11 @@ namespace Monospark
             return values;
         }
 
-        static Vector3[] ReadVectors(StreamReader reader, int count, CancellationToken cancellationToken)
+        // Instance (not static, unlike the other Read*/Skip helpers here): needs
+        // WorldUp so a vector field like Velocity gets the same axis
+        // conversion as POINTS, or its direction would point wrong once
+        // OrientToVelocity (InstancedPointRender.shader) rotates a glyph to it.
+        Vector3[] ReadVectors(StreamReader reader, int count, CancellationToken cancellationToken)
         {
             var values = new Vector3[count];
             for (int i = 0; i < count; i++)
@@ -298,7 +349,7 @@ namespace Monospark
                 float x = ParseFloat(NextToken(ref tokens));
                 float y = ParseFloat(NextToken(ref tokens));
                 float z = ParseFloat(NextToken(ref tokens));
-                values[i] = new Vector3(x, y, z);
+                values[i] = WorldUp.ToUnity(new Vector3(x, y, z));
             }
             return values;
         }

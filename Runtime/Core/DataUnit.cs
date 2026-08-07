@@ -8,6 +8,28 @@ namespace Monospark
 
     }
 
+    // Which axis a source file's raw coordinates treat as "up" -- CFD/CAD
+    // tooling often authors Z-up, Unity is Y-up. Readers that parse raw
+    // point/vector coordinates (VtkUnstructuredGridReader's POINTS/VECTORS,
+    // VtkFrameReader's CSV X/Y/Z columns) convert every one they read
+    // according to this, so the rest of the pipeline (bounds, voxelization,
+    // rendering) only ever sees Unity-space coordinates.
+    public enum WorldUpAxis
+    {
+        Y, // already Unity's convention -- points/vectors are used as-is.
+        Z  // source is Z-up -- Y and Z are swapped on every point/vector read.
+    }
+
+    public static class WorldUpAxisExtensions
+    {
+        // Z-up -> Y-up: swap Y and Z. A plain swap (no sign flip) is the
+        // common convention for "CAD/CFD Z-up" sources; if a specific source
+        // needs a different chirality correction, convert it before feeding
+        // this reader.
+        public static Vector3 ToUnity(this WorldUpAxis axis, Vector3 v) =>
+            axis == WorldUpAxis.Z ? new Vector3(v.x, v.z, v.y) : v;
+    }
+
     // One CELLS + CELL_TYPES entry: the point indices making up a cell and its
     // VTK cell-shape id (e.g. 12 = VTK_HEXAHEDRON, the only type room.vtk uses).
     public struct VtkCell

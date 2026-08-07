@@ -1,4 +1,4 @@
-Shader "Custom/VolumeRenderer_BL"
+Shader "Custom/HDRP/VolumeRenderer_BL"
 {
     Properties
     {
@@ -17,11 +17,14 @@ Shader "Custom/VolumeRenderer_BL"
         // Applied to a unit Cube (Unity's built-in Cube mesh spans -0.5..0.5
         // per axis in object space) — that box is what _Volume is raymarched
         // through, object-space position doubling as the 0..1 texture UV.
-        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" "RenderPipeline" = "UniversalPipeline" }
+        Tags { "RenderType" = "Transparent" "Queue" = "Transparent" "RenderPipeline" = "HDRenderPipeline" }
 
         Pass
         {
-            Tags { "LightMode" = "UniversalForward" }
+            // HDRP's Lit.shader uses this same "Forward" LightMode for its
+            // transparent pass — it's what HDRP's forward transparent render
+            // list picks up (HDRP has no equivalent of URP's "UniversalForward").
+            Tags { "LightMode" = "Forward" }
 
             // Cull Front (not Back): we rasterize the box's far side so the
             // fragment position is always the ray's exit point, which keeps
@@ -40,8 +43,13 @@ Shader "Custom/VolumeRenderer_BL"
             #pragma vertex vert
             #pragma fragment frag
 
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/Core.hlsl"
-            #include "Packages/com.unity.render-pipelines.universal/ShaderLibrary/DeclareDepthTexture.hlsl"
+            // Common.hlsl + HDRP's ShaderVariables.hlsl replace URP's
+            // Core.hlsl + DeclareDepthTexture.hlsl: ShaderVariables.hlsl
+            // already declares _CameraDepthTexture and the
+            // LoadCameraDepth/SampleCameraDepth helpers used below, so no
+            // separate depth-declare include is needed.
+            #include "Packages/com.unity.render-pipelines.core/ShaderLibrary/Common.hlsl"
+            #include "Packages/com.unity.render-pipelines.high-definition/Runtime/ShaderLibrary/ShaderVariables.hlsl"
 
             TEXTURE3D(_Volume);
             SAMPLER(sampler_Volume);
@@ -102,7 +110,16 @@ Shader "Custom/VolumeRenderer_BL"
 
             half4 frag(Varyings IN) : SV_Target
             {
-                float3 rayOriginOS = TransformWorldToObject(_WorldSpaceCameraPos).xyz;
+                // GetCurrentViewPosition() (not _WorldSpaceCameraPos) — under
+                // HDRP's (default-on) camera-relative rendering, positions
+                // fed through TransformObjectToHClip/TransformWorldToObject
+                // are relative to the camera, which sits at the coordinate
+                // origin in that space; GetCurrentViewPosition() resolves to
+                // that same origin, while raw _WorldSpaceCameraPos would
+                // still be the camera's absolute world position and offset
+                // the whole ray. Also a no-op fallback (returns the real
+                // camera position) when camera-relative rendering is off.
+                float3 rayOriginOS = TransformWorldToObject(GetCurrentViewPosition()).xyz;
                 float3 rayDirOS = normalize(IN.positionOS - rayOriginOS);
                 float3 invRayDirOS = 1.0 / rayDirOS;
 
@@ -115,8 +132,11 @@ Shader "Custom/VolumeRenderer_BL"
                 // embedded in the volume (e.g. a rack) would either blank out
                 // the whole ray at that pixel (default ZTest) or get painted
                 // over entirely (ZTest Always, used here).
-                float2 screenUV = GetNormalizedScreenSpaceUV(IN.positionHCS);
-                float rawDepth = SampleSceneDepth(screenUV);
+                // _ScreenSize (HDRP's per-camera constant, (width, height,
+                // 1/width, 1/height)) replaces URP's GetNormalizedScreenSpaceUV
+                // helper, which HDRP doesn't provide.
+                float2 screenUV = IN.positionHCS.xy * _ScreenSize.zw;
+                float rawDepth = SampleCameraDepth(screenUV);
 
                 // The depth buffer's "nothing drawn here" clear value depends on
                 // UNITY_REVERSED_Z — only attempt the clip when there's an
@@ -140,7 +160,10 @@ Shader "Custom/VolumeRenderer_BL"
                     // and project it onto the ray via dot() — stays entirely in
                     // object-space units, so it's correct under any (including
                     // non-uniform) scale without needing a world/object
-                    // conversion factor.
+                    // conversion factor. scenePosWS is already in the same
+                    // (camera-relative or absolute) space as rayOriginOS above,
+                    // since both ultimately derive from UNITY_MATRIX_I_VP /
+                    // GetCurrentViewPosition() under HDRP's current convention.
                     float3 scenePosOS = TransformWorldToObject(scenePosWS);
                     float sceneDstOS = dot(scenePosOS - rayOriginOS, rayDirOS);
 

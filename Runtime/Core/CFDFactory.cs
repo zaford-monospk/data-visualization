@@ -21,6 +21,7 @@ namespace Monospark
 
         private readonly string _instancedModelRenderer = "_CFDVolume/GridRenderer";
         private readonly string _raymarchVolumePlayer = "_CFDVolume/VolumePlayer";
+        private readonly string _raymarchVolumeStatic = "_CFDVolume/VolumeStatic";
 
         // Instances _CFDVolume/GridRenderer (pre-wired with a Material +
         // InstanceMesh) at worldPosition/rotation, then starts loading
@@ -31,7 +32,8 @@ namespace Monospark
         // fires once on that terminal status — e.g. for a caller to re-enable
         // a Create button it disabled while this was loading.
         public VtkUnstructuredGridRenderer CreateGridRenderer(
-            string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null)
+            string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
+            WorldUpAxis worldUp = WorldUpAxis.Y)
         {
             GameObject instance = InstantiatePrefab(_instancedModelRenderer, worldPosition, rotation);
             var gridRenderer = instance.GetComponent<VtkUnstructuredGridRenderer>();
@@ -52,7 +54,10 @@ namespace Monospark
                 }
             }
 
-            instance.AddComponent<DataConvertManager>().GetMap<VtkUnstructuredGridReader>(OnBufferReady, dataPath);
+            // Constructed directly (not GetMap<VtkUnstructuredGridReader>) so
+            // WorldUp can be set before Init/BuildData run.
+            var reader = new VtkUnstructuredGridReader { WorldUp = worldUp };
+            instance.AddComponent<DataConvertManager>().GetMap(OnBufferReady, dataPath, reader);
             return gridRenderer;
         }
 
@@ -61,10 +66,11 @@ namespace Monospark
         // for the same platform caveat: works on Desktop/Editor/iOS, not
         // Android/WebGL, since the reader underneath uses plain File I/O).
         public VtkUnstructuredGridRenderer CreateGridRendererFromStreamingAssets(
-            string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null)
+            string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
+            WorldUpAxis worldUp = WorldUpAxis.Y)
         {
             return CreateGridRenderer(
-                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete);
+                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete, worldUp);
         }
 
         // Instances _CFDVolume/VolumePlayer (pre-wired with a Material + child
@@ -108,6 +114,61 @@ namespace Monospark
         {
             return CreateVolumePlayer(
                 Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete);
+        }
+
+        // Instances _CFDVolume/VolumeStatic (pre-wired with a Material + child
+        // Cube as TargetCube) at worldPosition/rotation, then starts loading
+        // dataPath's single static snapshot file (.vtk or .csv -- see
+        // VtkFrameReader) into it -- VtkFrameRenderer displays it as a single
+        // static raymarched volume (VolumeRenderer.shader), no playback.
+        // Returned immediately; Set() runs once the async load completes.
+        // onComplete (true = success, false = error) fires once on that
+        // terminal status.
+        public VtkFrameRenderer CreateVolumeStatic(
+            string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
+            WorldUpAxis worldUp = WorldUpAxis.Y)
+        {
+            GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
+            var renderer = instance.GetComponent<VtkFrameRenderer>();
+            if (renderer == null)
+                throw new MissingComponentException($"{_raymarchVolumeStatic} prefab has no {nameof(VtkFrameRenderer)}.");
+
+            // Constructed directly (not GetMap<VtkFrameReader>) so WorldUp can
+            // be set before Init/BuildData run, and DataSize is still readable
+            // off this instance after BuildData's callback fires -- reader.DataSize
+            // is the source file's real-world extent when it had usable bounds
+            // (.vtk POINTS / .csv X-Y-Z), which sizes TargetCube far more
+            // meaningfully than its voxel-grid resolution.
+            var reader = new VtkFrameReader { WorldUp = worldUp };
+
+            void OnTextureReady(DataConverter.Progress progress, Texture3D texture)
+            {
+                switch (progress.Status)
+                {
+                    case DataConverter.eStatus.SUCCESS:
+                        renderer.Set(texture, reader.DataSize);
+                        onComplete?.Invoke(true);
+                        break;
+                    case DataConverter.eStatus.ERROR:
+                        onComplete?.Invoke(false);
+                        break;
+                }
+            }
+
+            instance.AddComponent<DataConvertManager>().GetMap(OnTextureReady, dataPath, reader);
+            return renderer;
+        }
+
+        // Same as CreateVolumeStatic, but relativePath is resolved against
+        // Application.streamingAssetsPath (see DataConverter.InitFromStreamingAssets
+        // for the same platform caveat: works on Desktop/Editor/iOS, not
+        // Android/WebGL, since the reader underneath uses plain File I/O).
+        public VtkFrameRenderer CreateVolumeStaticFromStreamingAssets(
+            string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
+            WorldUpAxis worldUp = WorldUpAxis.Y)
+        {
+            return CreateVolumeStatic(
+                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete, worldUp);
         }
 
         static GameObject InstantiatePrefab(string resourcePath, Vector3 worldPosition, Quaternion rotation)
