@@ -17,7 +17,12 @@ namespace Monospark
 
         float _yaw;
         float _pitch;
-
+        
+        public bool MoveHorizontally = false;
+        public float PhysicsRadius = 0.3f;
+        public LayerMask WallLayer;
+        
+        
         void Start()
         {
             Vector3 euler = transform.eulerAngles;
@@ -28,7 +33,7 @@ namespace Monospark
         void Update()
         {
             Mouse mouse = Mouse.current;
-            if (mouse == null || !mouse.rightButton.isPressed)
+            if (mouse == null || !mouse.leftButton.isPressed)
                 return;
 
             UpdateLook(mouse);
@@ -50,16 +55,62 @@ namespace Monospark
             if (keyboard == null)
                 return;
 
+            Vector3 forward = transform.forward;
+            Vector3 right = transform.right;
+            if (MoveHorizontally)
+            {
+                forward.y = 0f;
+                right.y = 0f;
+                forward.Normalize();
+                right.Normalize();
+            }
+
             Vector3 move = Vector3.zero;
-            if (keyboard.wKey.isPressed) move += transform.forward;
-            if (keyboard.sKey.isPressed) move -= transform.forward;
-            if (keyboard.dKey.isPressed) move += transform.right;
-            if (keyboard.aKey.isPressed) move -= transform.right;
+            if (keyboard.wKey.isPressed) move += forward;
+            if (keyboard.sKey.isPressed) move -= forward;
+            if (keyboard.dKey.isPressed) move += right;
+            if (keyboard.aKey.isPressed) move -= right;
 
             if (move.sqrMagnitude > 1f)
                 move.Normalize();
 
-            transform.position += move * (MoveSpeed * Time.deltaTime);
+            Vector3 delta = move * (MoveSpeed * Time.deltaTime);
+            transform.position += ResolveMove(transform.position, delta);
+        }
+
+        // Sphere-casts the intended delta against WallLayer and, on a hit,
+        // slides the leftover movement along the surface instead of just
+        // stopping — so grazing a wall at an angle slides around it rather
+        // than snagging.
+        Vector3 ResolveMove(Vector3 origin, Vector3 delta)
+        {
+            const int maxIterations = 3;
+            const float skin = 0.01f;
+
+            Vector3 position = origin;
+            Vector3 remaining = delta;
+
+            for (int i = 0; i < maxIterations && remaining.sqrMagnitude > 0.0000001f; i++)
+            {
+                float distance = remaining.magnitude;
+                Vector3 direction = remaining / distance;
+
+                if (Physics.SphereCast(position, PhysicsRadius, direction, out RaycastHit hit, distance, WallLayer, QueryTriggerInteraction.Ignore))
+                {
+                    float safeDistance = Mathf.Max(hit.distance - skin, 0f);
+                    position += direction * safeDistance;
+
+                    Vector3 leftover = direction * (distance - safeDistance);
+                    remaining = Vector3.ProjectOnPlane(leftover, hit.normal);
+                }
+                else
+                {
+                    position += remaining;
+                    remaining = Vector3.zero;
+                }
+            }
+
+            return position - origin;
         }
     }
 }
