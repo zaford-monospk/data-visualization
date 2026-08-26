@@ -8,7 +8,7 @@ Material:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_Name: Volume
-  m_Shader: {fileID: 4800000, guid: d95e64ef7d0e06e47825f7d36b3b237b, type: 3}
+  m_Shader: {fileID: 4800000, guid: 93103ee5bf89840c9b2558ad08d1ea93, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []
@@ -99,6 +99,7 @@ Material:
     - _BumpScale: 1
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
+    - _ClipFeather: 0.01
     - _ClipMax: 1
     - _ClipMin: 0
     - _Cull: 2
@@ -109,6 +110,7 @@ Material:
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EnvironmentReflections: 1
+    - _ExtinctionScale: 100
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
