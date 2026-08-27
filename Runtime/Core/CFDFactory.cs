@@ -1,5 +1,4 @@
 using System;
-using System.IO;
 using UnityEngine;
 
 namespace Monospark
@@ -33,7 +32,7 @@ namespace Monospark
         // a Create button it disabled while this was loading.
         public VtkUnstructuredGridRenderer CreateGridRenderer(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y)
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
         {
             GameObject instance = InstantiatePrefab(_instancedModelRenderer, worldPosition, rotation);
             var gridRenderer = instance.GetComponent<VtkUnstructuredGridRenderer>();
@@ -57,20 +56,19 @@ namespace Monospark
             // Constructed directly (not GetMap<VtkUnstructuredGridReader>) so
             // WorldUp can be set before Init/BuildData run.
             var reader = new VtkUnstructuredGridReader { WorldUp = worldUp };
-            instance.AddComponent<DataConvertManager>().GetMap(OnBufferReady, dataPath, reader);
+            instance.AddComponent<DataConvertManager>().GetMap(OnBufferReady, dataPath, reader, pathMode);
             return gridRenderer;
         }
 
-        // Same as CreateGridRenderer, but relativePath is resolved against
-        // Application.streamingAssetsPath (see DataConverter.InitFromStreamingAssets
-        // for the same platform caveat: works on Desktop/Editor/iOS, not
-        // Android/WebGL, since the reader underneath uses plain File I/O).
+        // Same as CreateGridRenderer with pathMode: DataPathMode.StreamingAssets
+        // (see DataConverter.InitFromStreamingAssets for the platform caveat:
+        // works on Desktop/Editor/iOS, not Android/WebGL, since the reader
+        // underneath uses plain File I/O). Kept as a convenience overload.
         public VtkUnstructuredGridRenderer CreateGridRendererFromStreamingAssets(
             string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
             WorldUpAxis worldUp = WorldUpAxis.Y)
         {
-            return CreateGridRenderer(
-                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete, worldUp);
+            return CreateGridRenderer(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets);
         }
 
         // Instances _CFDVolume/VolumePlayer (pre-wired with a Material + child
@@ -80,7 +78,8 @@ namespace Monospark
         // immediately; Set() runs once the async load completes. onComplete
         // (true = success, false = error) fires once on that terminal status.
         public VtkFrameSequencePlayer CreateVolumePlayer(
-            string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null)
+            string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
+            DataPathMode pathMode = DataPathMode.Disk)
         {
             GameObject instance = InstantiatePrefab(_raymarchVolumePlayer, worldPosition, rotation);
             var player = instance.GetComponent<VtkFrameSequencePlayer>();
@@ -101,19 +100,18 @@ namespace Monospark
                 }
             }
 
-            instance.AddComponent<DataConvertManager>().GetMap<VtkFrameSequenceReader>(OnSequenceReady, dataPath);
+            instance.AddComponent<DataConvertManager>().GetMap<VtkFrameSequenceReader>(OnSequenceReady, dataPath, pathMode);
             return player;
         }
 
-        // Same as CreateVolumePlayer, but relativePath is resolved against
-        // Application.streamingAssetsPath (see DataConverter.InitFromStreamingAssets
-        // for the same platform caveat: works on Desktop/Editor/iOS, not
-        // Android/WebGL, since the reader underneath uses plain File I/O).
+        // Same as CreateVolumePlayer with pathMode: DataPathMode.StreamingAssets
+        // (see DataConverter.InitFromStreamingAssets for the platform caveat:
+        // works on Desktop/Editor/iOS, not Android/WebGL, since the reader
+        // underneath uses plain File I/O). Kept as a convenience overload.
         public VtkFrameSequencePlayer CreateVolumePlayerFromStreamingAssets(
             string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null)
         {
-            return CreateVolumePlayer(
-                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete);
+            return CreateVolumePlayer(relativePath, worldPosition, rotation, onComplete, DataPathMode.StreamingAssets);
         }
 
         // Instances _CFDVolume/VolumeStatic (pre-wired with a Material + child
@@ -126,7 +124,7 @@ namespace Monospark
         // terminal status.
         public VtkFrameRenderer CreateVolumeStatic(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y)
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
         {
             GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
             var renderer = instance.GetComponent<VtkFrameRenderer>();
@@ -155,20 +153,22 @@ namespace Monospark
                 }
             }
 
-            instance.AddComponent<DataConvertManager>().GetMap(OnTextureReady, dataPath, reader);
+            instance.AddComponent<DataConvertManager>().GetMap(OnTextureReady, dataPath, reader, pathMode);
             return renderer;
         }
 
-        // Same as CreateVolumeStatic, but relativePath is resolved against
-        // Application.streamingAssetsPath (see DataConverter.InitFromStreamingAssets
-        // for the same platform caveat: works on Desktop/Editor/iOS, not
-        // Android/WebGL, since the reader underneath uses plain File I/O).
+        // Same as CreateVolumeStatic with pathMode: DataPathMode.StreamingAssets
+        // (see DataConverter.InitFromStreamingAssets for the platform caveat:
+        // works on Desktop/Editor/iOS, not Android/WebGL, since the reader
+        // underneath uses plain File I/O). Kept as a convenience overload --
+        // for an Addressable source (DataPathMode.Addressable, which
+        // VtkFrameReader alone currently supports), call CreateVolumeStatic
+        // directly with dataPath set to the Addressable's address/key.
         public VtkFrameRenderer CreateVolumeStaticFromStreamingAssets(
             string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
             WorldUpAxis worldUp = WorldUpAxis.Y)
         {
-            return CreateVolumeStatic(
-                Path.Combine(Application.streamingAssetsPath, relativePath), worldPosition, rotation, onComplete, worldUp);
+            return CreateVolumeStatic(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets);
         }
 
         static GameObject InstantiatePrefab(string resourcePath, Vector3 worldPosition, Quaternion rotation)

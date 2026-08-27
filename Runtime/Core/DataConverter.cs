@@ -3,6 +3,17 @@ using UnityEngine;
 
 namespace Monospark
 {
+    // Which of DataConverter's Init family a dataPath argument should be routed
+    // through -- lets a caller (e.g. CFDFactory.CreateVolumeStatic) pick the
+    // source kind with one flag instead of juggling separate Create.../CreateXFromStreamingAssets
+    // overloads. See DataConverter.InitFromPath.
+    public enum DataPathMode
+    {
+        Disk,            // path is used as-is -- Init(path).
+        StreamingAssets, // path is resolved against Application.streamingAssetsPath -- InitFromStreamingAssets(path).
+        Addressable,     // path is an Addressable address/key -- InitFromAddressable(path). Currently only VtkFrameReader's BuildData honors AddressableKey.
+    }
+
     public abstract class DataConverter
     {
         public class Progress
@@ -55,6 +66,26 @@ namespace Monospark
         public void InitFromAddressable(string address)
         {
             AddressableKey = address;
+        }
+
+        // Dispatches to Init/InitFromStreamingAssets/InitFromAddressable based
+        // on mode -- lets a caller hold a single string + DataPathMode pair
+        // (e.g. a factory method's dataPath/pathMode arguments) instead of
+        // picking which Init* overload to call itself.
+        public void InitFromPath(string path, DataPathMode mode)
+        {
+            switch (mode)
+            {
+                case DataPathMode.StreamingAssets:
+                    InitFromStreamingAssets(path);
+                    break;
+                case DataPathMode.Addressable:
+                    InitFromAddressable(path);
+                    break;
+                default:
+                    Init(path);
+                    break;
+            }
         }
 
         public abstract void BuildData(OnProcessTex3DData callback);
