@@ -106,11 +106,12 @@ namespace Monospark
                         $"{nameof(VtkFrameReader)} only reads .vtk or .csv files, got '{extension}' ({FilePath}).");
                 }
 
+                Debug.Log($"[VtkFrameReader] Built texture from '{FilePath}': {texture.width}x{texture.height}x{texture.depth}");
                 callback?.Invoke(new Progress { Status = eStatus.SUCCESS, ProgressValue = 1f }, texture);
             }
             catch (Exception e)
             {
-                Debug.LogException(e);
+                Debug.LogError($"[VtkFrameReader] BuildData failed (AddressableKey='{AddressableKey}', FilePath='{FilePath}'): {e}");
                 callback?.Invoke(new Progress { Status = eStatus.ERROR, ProgressValue = 0f }, null);
             }
             finally
@@ -153,8 +154,13 @@ namespace Monospark
         // importer) to be loadable here at all.
         async Task StageAddressableAsync(string address)
         {
+            Debug.Log($"[VtkFrameReader] Loading addressable '{address}' as TextAsset...");
+
             AsyncOperationHandle<TextAsset> handle = Addressables.LoadAssetAsync<TextAsset>(address);
             TextAsset asset = await handle.Task;
+
+            Debug.Log($"[VtkFrameReader] Addressable '{address}' load finished: status={handle.Status}, " +
+                      $"asset={(asset == null ? "null" : asset.name)}, bytes={(asset == null ? -1 : asset.bytes.Length)}");
 
             if (handle.Status != AsyncOperationStatus.Succeeded || asset == null)
             {
@@ -162,10 +168,23 @@ namespace Monospark
                 throw new FileNotFoundException($"Addressable '{address}' could not be loaded as a TextAsset.", address);
             }
 
+            // Extension is taken from `address` (the Addressable key), NOT from
+            // the TextAsset itself -- Unity gives TextAsset no reliable way to
+            // recover its original source extension at runtime. If the address
+            // was chosen without one (e.g. a bare "CFDData/Room" key rather
+            // than ".../room.csv"), BuildData's extension dispatch below has
+            // nothing to go on and throws NotSupportedException -- give the
+            // Addressable a key that ends in .csv/.vtk to avoid that.
             string extension = Path.GetExtension(address);
+            if (string.IsNullOrEmpty(extension))
+                Debug.LogWarning($"[VtkFrameReader] Addressable key '{address}' has no file extension -- " +
+                                  "BuildData won't be able to tell .csv from .vtk from the staged file alone.");
+
             string stagedPath = Path.Combine(
                 Application.temporaryCachePath, $"{Path.GetFileNameWithoutExtension(address)}_{Guid.NewGuid():N}{extension}");
             File.WriteAllBytes(stagedPath, asset.bytes);
+
+            Debug.Log($"[VtkFrameReader] Staged addressable '{address}' -> '{stagedPath}' ({asset.bytes.Length} bytes)");
 
             Addressables.Release(handle);
 
