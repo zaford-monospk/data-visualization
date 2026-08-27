@@ -9,6 +9,15 @@ Shader "Custom/VolumeRenderer"
         _AlphaCutoff("Alpha Cutoff", Range(0, 1)) = 0.99
         _ClipMin("Clip Range Min", Range(0, 1)) = 0
         _ClipMax("Clip Range Max", Range(0, 1)) = 1
+        // 0 = smooth gradient (the original behavior, so existing materials
+        // that predate this property are unaffected). > 0 quantizes the LUT
+        // lookup into that many discrete color bands instead.
+        _ColorSteps("Color Steps (0 = smooth)", Range(0, 64)) = 0
+        // Scales the per-pixel ray-start jitter that turns raymarch step
+        // banding into noise instead. 1 = original behavior (full jitter);
+        // lower toward 0 for a more solid/filled look at the cost of visible
+        // banding if _StepCount is too low to hide it otherwise.
+        _JitterStrength("Jitter Strength (0 = filled, banding)", Range(0, 1)) = 1
     }
 
     SubShader
@@ -53,6 +62,8 @@ Shader "Custom/VolumeRenderer"
                 float _AlphaCutoff;
                 float _ClipMin;
                 float _ClipMax;
+                float _ColorSteps;
+                float _JitterStrength;
             CBUFFER_END
 
             struct Attributes
@@ -91,11 +102,15 @@ Shader "Custom/VolumeRenderer"
                 return float2(dstToBox, dstInsideBox);
             }
 
-            float Hash13(float3 p)
+            // Standard interleaved-gradient-noise dither (same trick HDRP's
+            // volumetric fog uses): still breaks up raymarch step banding
+            // into noise like a plain per-pixel hash would, but the pattern
+            // it produces reads as far less "static"/dizzy at the same
+            // _StepCount, since it isn't independent white noise.
+            float InterleavedGradientNoise(float2 pixelCoord)
             {
-                p = frac(p * 0.1031);
-                p += dot(p, p.yzx + 33.33);
-                return frac((p.x + p.y) * p.z);
+                const float3 magic = float3(0.06711056, 0.00583715, 52.9829189);
+                return frac(magic.z * frac(dot(pixelCoord, magic.xy)));
             }
 
             half4 frag(Varyings IN) : SV_Target
@@ -151,8 +166,11 @@ Shader "Custom/VolumeRenderer"
                 int steps = max(1, (int)_StepCount);
                 float stepSize = dstInsideBox / steps;
 
-                // Jitter the ray start per-pixel to turn step-size banding into noise.
-                float jitter = Hash13(IN.positionHCS.xyz) * stepSize;
+                // Jitter the ray start per-pixel to turn step-size banding into
+                // noise, scaled by _JitterStrength (1 = full, 0 = none -- a
+                // fully solid/filled look, trading back in visible banding if
+                // _StepCount is too low to hide it otherwise).
+                float jitter = InterleavedGradientNoise(IN.positionHCS.xy) * stepSize * _JitterStrength;
                 float3 samplePos = rayOriginOS + rayDirOS * (dstToBox + jitter);
 
                 half3 accumulatedColor = 0;
@@ -175,9 +193,21 @@ Shader "Custom/VolumeRenderer"
                     half inRange = step(_ClipMin, volumeSample.x) * step(volumeSample.x, _ClipMax);
                     half density = saturate(volumeSample.x * volumeSample.y * _DensityMultiplier) * inRange;
 
+                    // _ColorSteps > 0 quantizes the LUT lookup into that many
+                    // equal-width bins (discrete color bands) instead of a
+                    // smooth gradient -- each bin samples the LUT at its
+                    // center, so the band boundary is exact regardless of the
+                    // LUT texture's own filter mode.
+                    float lutU = volumeSample.x;
+                    if (_ColorSteps > 0.5)
+                    {
+                        float bin = min(floor(lutU * _ColorSteps), _ColorSteps - 1);
+                        lutU = (bin + 0.5) / _ColorSteps;
+                    }
+
                     // u = normalized scalar value, v = 0.5 (LUT used as a 1D ramp).
                     half3 sampleColor = SAMPLE_TEXTURE2D_LOD(
-                        _TemperatureLUT, sampler_TemperatureLUT, float2(volumeSample.x, 0.5), 0).rgb;
+                        _TemperatureLUT, sampler_TemperatureLUT, float2(lutU, 0.5), 0).rgb;
                     half sampleAlpha = density * (1.0 - accumulatedAlpha);
 
                     accumulatedColor += sampleColor * sampleAlpha;
