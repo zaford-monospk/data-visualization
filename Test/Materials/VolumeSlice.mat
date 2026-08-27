@@ -7,8 +7,8 @@ Material:
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
-  m_Name: Volume
-  m_Shader: {fileID: 4800000, guid: 93103ee5bf89840c9b2558ad08d1ea93, type: 3}
+  m_Name: VolumeSlice
+  m_Shader: {fileID: 4800000, guid: 789ea3a2c6d57e648b984216440f590a, type: 3}
   m_Parent: {fileID: 0}
   m_ModifiedSerializedProperties: 0
   m_ValidKeywords: []
@@ -92,17 +92,16 @@ Material:
     m_Floats:
     - _AddPrecomputedVelocity: 0
     - _AlphaClip: 0
-    - _AlphaCutoff: 1
+    - _AlphaCutoff: 0.99
     - _AlphaToMask: 0
     - _Blend: 0
     - _BlendModePreserveSpecular: 1
     - _BumpScale: 1
     - _ClearCoatMask: 0
     - _ClearCoatSmoothness: 0
-    - _ClipFeather: 0.01
-    - _ClipMax: 0.95
-    - _ClipMin: 0.052
-    - _ColorSteps: 31.1
+    - _ClipMax: 1
+    - _ClipMin: 0
+    - _ColorSteps: 0
     - _Cull: 2
     - _Cutoff: 0.5
     - _DensityMultiplier: 1
@@ -111,7 +110,6 @@ Material:
     - _DstBlend: 0
     - _DstBlendAlpha: 0
     - _EnvironmentReflections: 1
-    - _ExtinctionScale: 100
     - _GlossMapScale: 0
     - _Glossiness: 0
     - _GlossyReflections: 0
@@ -126,7 +124,7 @@ Material:
     - _SpecularHighlights: 1
     - _SrcBlend: 1
     - _SrcBlendAlpha: 1
-    - _StepCount: 86
+    - _StepCount: 64
     - _Surface: 0
     - _WorkflowMode: 1
     - _XRMotionVectorsPass: 1
@@ -134,13 +132,11 @@ Material:
     m_Colors:
     - _BaseColor: {r: 1, g: 1, b: 1, a: 1}
     - _Color: {r: 1, g: 1, b: 1, a: 1}
-    - _ColorCold: {r: 0, g: 0.19999996, b: 1, a: 1}
-    - _ColorHot: {r: 1, g: 0.19999996, b: 0, a: 1}
     - _EmissionColor: {r: 0, g: 0, b: 0, a: 1}
     - _SpecColor: {r: 0.19999996, g: 0.19999996, b: 0.19999996, a: 1}
   m_BuildTextureStacks: []
   m_AllowLocking: 1
---- !u!114 &6354190464481068706
+--- !u!114 &2513536117545067832
 MonoBehaviour:
   m_ObjectHideFlags: 11
   m_CorrespondingSourceObject: {fileID: 0}

@@ -6,9 +6,16 @@ namespace Monospark
     // -- the non-animated counterpart to VtkFrameSequencePlayer: no Update()
     // loop, no frame stepping, no interpolation state, just Material._Volume +
     // TargetCube scaled to the texture's dims, same as TestAction's static case.
+    // Optionally also drives TargetPlane (VolumeSlicePlane.shader) as an
+    // independent cross-section view of the same Texture3D -- free to be
+    // positioned/rotated anywhere by the caller, kept in sync every frame via
+    // SliceMaterial's _VolumeWorldToLocal (see LateUpdate). TargetCube/Material
+    // and TargetPlane/SliceMaterial are both optional and independent: either,
+    // both, or neither can be visible at once.
     public class VtkFrameRenderer : MonoBehaviour, IRenderStateControl
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
+        static readonly int VolumeWorldToLocalId = Shader.PropertyToID("_VolumeWorldToLocal");
 
 #if UNITY_WEBGL
         // VolumeRenderer.shader's scene-depth occlusion clip reads back
@@ -23,6 +30,15 @@ namespace Monospark
 
         public Material Material;
         public Transform TargetCube; // optional: scaled to worldSize, or texture dims * FallbackScale if worldSize is unknown
+
+        // Optional cross-section slicer: a flat plane (any mesh/transform,
+        // not required to be parented under or aligned with TargetCube) that
+        // shows a single slice of the same Texture3D via VolumeSlicePlane.shader.
+        // SliceMaterial is a separate Material from Material/TargetCube's, not
+        // a shader swap on the same one -- both can be visible/tuned at once
+        // (e.g. a raymarched cube plus a cutaway slice through it).
+        public Transform TargetPlane;
+        public Material SliceMaterial;
 
         // Multiplies the texture's raw voxel-grid resolution (e.g. 64x64x64)
         // when Set() isn't given a real-world size -- using the voxel count
@@ -50,12 +66,33 @@ namespace Monospark
 #endif
         }
 
+        // TargetPlane and TargetCube can move independently (the plane is a
+        // free-form slicer, not parented under the cube), so the matrix that
+        // reprojects the plane's fragments into the volume's local space has
+        // to be refreshed every frame rather than once. LateUpdate (not
+        // Update) so this reads TargetCube's transform after anything else
+        // that might move it this frame has already run.
+        void LateUpdate()
+        {
+            if (SliceMaterial != null && TargetCube != null)
+                SliceMaterial.SetMatrix(VolumeWorldToLocalId, TargetCube.worldToLocalMatrix);
+        }
+
         // TargetCube is what's actually drawn (a normal MeshRenderer), so
         // visibility toggles its Renderer directly.
         public void SetVisibility(bool isVisible)
         {
             if (TargetCube != null && TargetCube.TryGetComponent<Renderer>(out var cubeRenderer))
                 cubeRenderer.enabled = isVisible;
+        }
+
+        // Independent of SetVisibility/TargetCube -- TargetPlane is an
+        // optional, separately-toggleable view of the same data, not part of
+        // IRenderStateControl's single visibility flag.
+        public void SetSliceVisibility(bool isVisible)
+        {
+            if (TargetPlane != null && TargetPlane.TryGetComponent<Renderer>(out var planeRenderer))
+                planeRenderer.enabled = isVisible;
         }
 
         // Returns the property's previous value, so callers can restore it later.
@@ -117,6 +154,8 @@ namespace Monospark
 
             if (Material != null)
                 Material.SetTexture(VolumeId, _texture);
+            if (SliceMaterial != null)
+                SliceMaterial.SetTexture(VolumeId, _texture);
             if (TargetCube != null && _texture != null)
             {
                 TargetCube.localScale = worldSize ??
