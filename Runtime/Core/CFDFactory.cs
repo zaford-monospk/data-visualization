@@ -71,6 +71,45 @@ namespace Monospark
             return CreateGridRenderer(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets);
         }
 
+        // Same visual result as CreateGridRenderer (instanced point/glyph
+        // cloud via VtkUnstructuredGridRenderer, colored by Temperature,
+        // oriented by Velocity), but sourced from a CSV point cloud (via
+        // VtkFrameReader.IncludeVelocity) instead of a .vtk file's real cell
+        // connectivity -- for CFD exports that only ship as CSV (e.g.
+        // Test_Room_16000.csv). dataPath's CSV must have Velocity[i]/[j]/[k]
+        // columns -- not every export has them (boundary-condition exports
+        // typically don't); BuildData reports that clearly if they're
+        // missing. velocityResolution controls how many buckets the
+        // (potentially 10,000+ row) CSV gets downsampled into -- see
+        // VtkFrameReader.VelocityResolution -- lower for fewer/sparser glyphs.
+        public VtkUnstructuredGridRenderer CreateVelocityGridFromCsv(
+            string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
+            WorldUpAxis worldUp = WorldUpAxis.Y, int velocityResolution = 16, DataPathMode pathMode = DataPathMode.Disk)
+        {
+            GameObject instance = InstantiatePrefab(_instancedModelRenderer, worldPosition, rotation);
+            var gridRenderer = instance.GetComponent<VtkUnstructuredGridRenderer>();
+            if (gridRenderer == null)
+                throw new MissingComponentException($"{_instancedModelRenderer} prefab has no {nameof(VtkUnstructuredGridRenderer)}.");
+
+            void OnBufferReady(DataConverter.Progress progress, VtkUnstructuredGridData buffer)
+            {
+                switch (progress.Status)
+                {
+                    case DataConverter.eStatus.SUCCESS:
+                        gridRenderer.Set(buffer);
+                        onComplete?.Invoke(true);
+                        break;
+                    case DataConverter.eStatus.ERROR:
+                        onComplete?.Invoke(false);
+                        break;
+                }
+            }
+
+            var reader = new VtkFrameReader { WorldUp = worldUp, IncludeVelocity = true, VelocityResolution = velocityResolution };
+            instance.AddComponent<DataConvertManager>().GetMap(OnBufferReady, dataPath, reader, pathMode);
+            return gridRenderer;
+        }
+
         // Instances _CFDVolume/VolumePlayer (pre-wired with a Material + child
         // Cube as TargetCube) at worldPosition/rotation, then starts loading
         // dataPath's voxelized time sequence into it — VtkFrameSequencePlayer

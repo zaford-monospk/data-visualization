@@ -26,6 +26,10 @@ namespace Monospark
         public Vector3 GridRendererPosition;
         public Vector3 GridRendererEulerRotation;
 
+        [Header("Velocity Grid (CSV, instanced)")]
+        public Vector3 VelocityGridPosition;
+        public Vector3 VelocityGridEulerRotation;
+
         [Header("Volume Player (raymarch)")]
         public Vector3 VolumePlayerPosition;
         public Vector3 VolumePlayerEulerRotation;
@@ -40,34 +44,51 @@ namespace Monospark
         // field, so a stale/wrong Inspector value could never end up silently
         // in use — the field always reflects exactly what's on screen.
         string _gridRendererDataPath = "";
+        string _velocityGridDataPath = "";
         string _volumePlayerDataPath = "";
         string _volumeStaticDataPath = "";
         PathMode _gridPathMode;
+        PathMode _velocityGridPathMode;
         PathMode _volumePathMode;
         PathMode _volumeStaticPathMode;
 
         // Only for sections whose reader parses raw point coordinates
-        // (Grid Renderer's .vtk, Volume Static's .vtk/.csv) -- the Volume
-        // Player reads pre-baked voxel frames with no per-point axis to convert.
+        // (Grid Renderer's .vtk, Velocity Grid's/Volume Static's .csv) -- the
+        // Volume Player reads pre-baked voxel frames with no per-point axis
+        // to convert.
         WorldUpAxis _gridWorldUp;
+        WorldUpAxis _velocityGridWorldUp;
         WorldUpAxis _volumeStaticWorldUp;
 
+        // Bucket count along the CSV's longest bounds axis -- see
+        // VtkFrameReader.VelocityResolution. Float (not int) since
+        // GUILayout.HorizontalSlider only comes in that flavor.
+        float _velocityGridResolution = 16f;
+
         IRenderStateControl _gridRenderer;
+        IRenderStateControl _velocityGrid;
         IRenderStateControl _volumePlayer;
         IRenderStateControl _volumeStatic;
         bool _gridRendererVisible = true;
+        bool _velocityGridVisible = true;
         bool _volumePlayerVisible = true;
         bool _volumeStaticVisible = true;
         bool _gridRendererLoading;
+        bool _velocityGridLoading;
         bool _volumePlayerLoading;
         bool _volumeStaticLoading;
         string _gridPathError;
+        string _velocityGridPathError;
         string _volumePathError;
         string _volumeStaticPathError;
         float _gridClipMin;
         float _gridClipMax = 1f;
         float _gridVelocityClipMin;
         float _gridVelocityClipMax = 1f;
+        float _velocityGridClipMin;
+        float _velocityGridClipMax = 1f;
+        float _velocityGridVelocityClipMin;
+        float _velocityGridVelocityClipMax = 1f;
         float _volumeClipMin;
         float _volumeClipMax = 1f;
         bool _volumeInterpolate;
@@ -76,7 +97,7 @@ namespace Monospark
         bool _collapsed;
 
         const float PanelWidth = 380f;
-        const float PanelHeight = 1110f;
+        const float PanelHeight = 1570f;
         const float HeaderHeight = 30f;
 
         static GUIStyle _errorStyle;
@@ -97,6 +118,8 @@ namespace Monospark
             {
                 GUILayout.Space(6);
                 DrawGridRendererSection();
+                GUILayout.Space(12);
+                DrawVelocityGridSection();
                 GUILayout.Space(12);
                 DrawVolumePlayerSection();
                 GUILayout.Space(12);
@@ -160,6 +183,74 @@ namespace Monospark
             DrawClipRangeControls(_gridRenderer, "_ClipMin", "_ClipMax", ref _gridClipMin, ref _gridClipMax, 100f, "°C");
             GUILayout.Label("Velocity"); // grid renderer only — VolumeRenderer.shader has no per-sample velocity
             DrawClipRangeControls(_gridRenderer, "_VelocityClipMin", "_VelocityClipMax", ref _gridVelocityClipMin, ref _gridVelocityClipMax);
+        }
+
+        // Same VtkUnstructuredGridRenderer/InstancedPointRender.shader as Grid
+        // Renderer above, but sourced from a CSV point cloud
+        // (CFDFactory.CreateVelocityGridFromCsv) instead of a .vtk file's
+        // real cell connectivity -- for CFD exports that only ship as CSV
+        // (e.g. Test_Room_16000.csv). Not every CSV has Velocity[i]/[j]/[k]
+        // columns (boundary-condition exports typically don't); Create just
+        // surfaces that as an error like any other failed load. Resolution
+        // controls how many buckets the (potentially 10,000+ row) CSV gets
+        // downsampled into before each bucket becomes one glyph (see
+        // VtkFrameReader.VelocityResolution) -- lower for fewer/sparser glyphs.
+        void DrawVelocityGridSection()
+        {
+            GUILayout.Label("Velocity Grid (CSV, instanced)" + (_velocityGridLoading ? " (loading...)" : ""));
+
+            _velocityGridDataPath = GUILayout.TextField(_velocityGridDataPath);
+            _velocityGridPathMode = (PathMode)GUILayout.SelectionGrid((int)_velocityGridPathMode, PathModeLabels, PathModeLabels.Length);
+
+            if (_velocityGridPathMode == PathMode.Disk)
+                DrawBrowseButton(isFolder: false, "Select CSV File", "csv", path => _velocityGridDataPath = path);
+
+            // Same Z-up-vs-Y-up concern as the other sections -- applies to
+            // the CSV's X/Y/Z and Velocity[i]/[j]/[k] columns alike (see
+            // VtkFrameReader.WorldUp).
+            _velocityGridWorldUp = (WorldUpAxis)GUILayout.SelectionGrid((int)_velocityGridWorldUp, WorldUpLabels, WorldUpLabels.Length);
+
+            GUILayout.Label($"Resolution: {(int)_velocityGridResolution}");
+            _velocityGridResolution = GUILayout.HorizontalSlider(_velocityGridResolution, 1f, 64f);
+
+            GUI.enabled = !_velocityGridLoading;
+            if (GUILayout.Button("Create"))
+            {
+                if (CFDFactory.Instance == null)
+                {
+                    Debug.LogError("[TestUI] No CFDFactory in scene.");
+                }
+                else if (!TryResolvePath(_velocityGridDataPath, _velocityGridPathMode, isDirectory: false,
+                             out string resolvedPath, out _velocityGridPathError))
+                {
+                    Debug.LogWarning($"[TestUI] {_velocityGridPathError}");
+                }
+                else
+                {
+                    DestroyIfExists(_velocityGrid);
+                    _velocityGridLoading = true;
+                    _velocityGrid = CFDFactory.Instance.CreateVelocityGridFromCsv(
+                        resolvedPath, VelocityGridPosition, Quaternion.Euler(VelocityGridEulerRotation),
+                        _ => _velocityGridLoading = false, _velocityGridWorldUp, (int)_velocityGridResolution);
+                    _velocityGridVisible = true;
+                    // Read the prefab-configured material's actual current values
+                    // rather than assuming the slider defaults (0/1) match them.
+                    _velocityGridClipMin = _velocityGrid.GetMaterialFloat("_ClipMin");
+                    _velocityGridClipMax = _velocityGrid.GetMaterialFloat("_ClipMax");
+                    _velocityGridVelocityClipMin = _velocityGrid.GetMaterialFloat("_VelocityClipMin");
+                    _velocityGridVelocityClipMax = _velocityGrid.GetMaterialFloat("_VelocityClipMax");
+                }
+            }
+            GUI.enabled = true;
+
+            if (!string.IsNullOrEmpty(_velocityGridPathError))
+                GUILayout.Label(_velocityGridPathError, ErrorStyle());
+
+            DrawVisibilityToggle(_velocityGrid, ref _velocityGridVisible, _velocityGridLoading);
+            GUILayout.Label("Temperature");
+            DrawClipRangeControls(_velocityGrid, "_ClipMin", "_ClipMax", ref _velocityGridClipMin, ref _velocityGridClipMax, 100f, "°C");
+            GUILayout.Label("Velocity");
+            DrawClipRangeControls(_velocityGrid, "_VelocityClipMin", "_VelocityClipMax", ref _velocityGridVelocityClipMin, ref _velocityGridVelocityClipMax);
         }
 
         void DrawVolumePlayerSection()
