@@ -15,9 +15,10 @@ namespace Monospark
     // like VtkUnstructuredGridReader, not a directory (that's only
     // VtkFrameSequenceReader, which needs a directory because its format
     // splits frames.raw from frames_meta.json). The source is either Init'd as
-    // a plain path (disk / InitFromStreamingAssets) or InitFromAddressable'd,
-    // in which case BuildData stages the Addressable to a temp file first --
-    // see StageAddressableAsync. Format is picked from the file's extension:
+    // a plain path (disk / InitFromStreamingAssets) or InitFromAddressable'd --
+    // an Addressable source is always CSV, loaded as a TextAsset and parsed
+    // straight from its .text (see LoadAddressableCsvAsync), no temp file
+    // involved. A FilePath source picks its format from the file's extension:
     //   .vtk - a legacy ASCII VTK UNSTRUCTURED_GRID file (e.g. room.vtk).
     //          Parsing is delegated to VtkUnstructuredGridReader itself --
     //          same format it already reads, no reason to duplicate that
@@ -61,52 +62,45 @@ namespace Monospark
         // back through the callback per DataConverter's async contract.
         public override async void BuildData(OnProcessTex3DData callback)
         {
-            string stagedPath = null;
             try
             {
                 callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0f }, null);
 
-                // Addressable source: stage it to a temp file and Init() this
-                // instance onto that file, so everything below (and, for .vtk,
-                // the inner VtkUnstructuredGridReader) keeps using the exact
-                // same plain-File-I/O path as the disk/StreamingAssets cases.
-                if (!string.IsNullOrEmpty(AddressableKey))
-                {
-                    await StageAddressableAsync(AddressableKey);
-                    stagedPath = FilePath;
-                }
-
-                if (!File.Exists(FilePath))
-                    throw new FileNotFoundException($"File not found: {FilePath}", FilePath);
-
-                string extension = Path.GetExtension(FilePath);
                 Texture3D texture;
 
-                if (extension.Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                if (!string.IsNullOrEmpty(AddressableKey))
                 {
-                    (Vector3[] points, float[] values) = await Task.Run(() => ParseCsv(CancellationToken.None));
-
-                    if (points.Length == 0)
-                        throw new InvalidDataException($"No points found in {FilePath}.");
-
-                    Bounds bounds = ComputeBounds(points);
-                    DataSize = bounds.size;
-
-                    callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0.9f }, null);
-
-                    texture = ToTexture3D(points, values, bounds);
-                }
-                else if (extension.Equals(".vtk", StringComparison.OrdinalIgnoreCase))
-                {
-                    texture = await ReadVtkAsTexture3D();
+                    // Addressable source is always a .csv TextAsset, parsed
+                    // straight from its in-memory .text -- no FilePath, no
+                    // temp file, no format dispatch (that's only needed for
+                    // the FilePath cases below, which can also be .vtk).
+                    (Vector3[] points, float[] values) = await LoadAddressableCsvAsync(AddressableKey);
+                    texture = BuildCsvTexture(points, values, $"addressable '{AddressableKey}'", callback);
                 }
                 else
                 {
-                    throw new NotSupportedException(
-                        $"{nameof(VtkFrameReader)} only reads .vtk or .csv files, got '{extension}' ({FilePath}).");
+                    if (!File.Exists(FilePath))
+                        throw new FileNotFoundException($"File not found: {FilePath}", FilePath);
+
+                    string extension = Path.GetExtension(FilePath);
+
+                    if (extension.Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                    {
+                        (Vector3[] points, float[] values) = await Task.Run(() => ParseCsv(CancellationToken.None));
+                        texture = BuildCsvTexture(points, values, FilePath, callback);
+                    }
+                    else if (extension.Equals(".vtk", StringComparison.OrdinalIgnoreCase))
+                    {
+                        texture = await ReadVtkAsTexture3D();
+                    }
+                    else
+                    {
+                        throw new NotSupportedException(
+                            $"{nameof(VtkFrameReader)} only reads .vtk or .csv files, got '{extension}' ({FilePath}).");
+                    }
                 }
 
-                Debug.Log($"[VtkFrameReader] Built texture from '{FilePath}': {texture.width}x{texture.height}x{texture.depth}");
+                Debug.Log($"[VtkFrameReader] Built texture: {texture.width}x{texture.height}x{texture.depth}");
                 callback?.Invoke(new Progress { Status = eStatus.SUCCESS, ProgressValue = 1f }, texture);
             }
             catch (Exception e)
@@ -114,13 +108,22 @@ namespace Monospark
                 Debug.LogError($"[VtkFrameReader] BuildData failed (AddressableKey='{AddressableKey}', FilePath='{FilePath}'): {e}");
                 callback?.Invoke(new Progress { Status = eStatus.ERROR, ProgressValue = 0f }, null);
             }
-            finally
-            {
-                // Only ever set when this run staged an Addressable itself --
-                // never deletes a caller-supplied disk/StreamingAssets FilePath.
-                if (stagedPath != null)
-                    TryDeleteStagedFile(stagedPath);
-            }
+        }
+
+        // Shared tail of both CSV entry points (disk-file and Addressable):
+        // bounds -> DataSize -> progress -> voxelize. sourceDescription is
+        // only used for the "no points" error message.
+        Texture3D BuildCsvTexture(Vector3[] points, float[] values, string sourceDescription, OnProcessTex3DData callback)
+        {
+            if (points.Length == 0)
+                throw new InvalidDataException($"No points found in {sourceDescription}.");
+
+            Bounds bounds = ComputeBounds(points);
+            DataSize = bounds.size;
+
+            callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0.9f }, null);
+
+            return ToTexture3D(points, values, bounds);
         }
 
         // This reader produces a single static Texture3D, not the raw
@@ -143,16 +146,13 @@ namespace Monospark
         }
 
         // Loads AddressableKey as a TextAsset through Unity's Addressable Asset
-        // System and writes its bytes to a temp file, then Init()s this instance
-        // onto that file -- letting the rest of BuildData reuse the exact same
-        // plain-File-I/O parsing path as the disk/StreamingAssets cases instead
-        // of a separate in-memory branch. Note: for this to work the source
-        // needs to actually import as a TextAsset -- Unity's default importer
-        // only recognizes a handful of text extensions (.csv, .txt, .bytes,
-        // .json, ...) that way, and .vtk is NOT one of them, so a .vtk
-        // Addressable typically needs an extra ".bytes" suffix (or a custom
-        // importer) to be loadable here at all.
-        async Task StageAddressableAsync(string address)
+        // System and parses its .text directly as CSV -- no temp file, no
+        // Init()/FilePath bounce. The handle is intentionally never released:
+        // this keeps the TextAsset (and the AssetBundle backing it) resident
+        // instead of releasing it right after one read, since Addressable
+        // sources here are always small point-cloud CSVs meant to stay loaded
+        // for the app's lifetime, not one-off reads.
+        async Task<(Vector3[] points, float[] values)> LoadAddressableCsvAsync(string address)
         {
             Debug.Log($"[VtkFrameReader] Loading addressable '{address}' as TextAsset...");
 
@@ -160,47 +160,12 @@ namespace Monospark
             TextAsset asset = await handle.Task;
 
             Debug.Log($"[VtkFrameReader] Addressable '{address}' load finished: status={handle.Status}, " +
-                      $"asset={(asset == null ? "null" : asset.name)}, bytes={(asset == null ? -1 : asset.bytes.Length)}");
+                      $"asset={(asset == null ? "null" : asset.name)}, chars={(asset == null ? -1 : asset.text.Length)}");
 
             if (handle.Status != AsyncOperationStatus.Succeeded || asset == null)
-            {
-                Addressables.Release(handle);
                 throw new FileNotFoundException($"Addressable '{address}' could not be loaded as a TextAsset.", address);
-            }
 
-            // Extension is taken from `address` (the Addressable key), NOT from
-            // the TextAsset itself -- Unity gives TextAsset no reliable way to
-            // recover its original source extension at runtime. If the address
-            // was chosen without one (e.g. a bare "CFDData/Room" key rather
-            // than ".../room.csv"), BuildData's extension dispatch below has
-            // nothing to go on and throws NotSupportedException -- give the
-            // Addressable a key that ends in .csv/.vtk to avoid that.
-            string extension = Path.GetExtension(address);
-            if (string.IsNullOrEmpty(extension))
-                Debug.LogWarning($"[VtkFrameReader] Addressable key '{address}' has no file extension -- " +
-                                  "BuildData won't be able to tell .csv from .vtk from the staged file alone.");
-
-            string stagedPath = Path.Combine(
-                Application.temporaryCachePath, $"{Path.GetFileNameWithoutExtension(address)}_{Guid.NewGuid():N}{extension}");
-            File.WriteAllBytes(stagedPath, asset.bytes);
-
-            Debug.Log($"[VtkFrameReader] Staged addressable '{address}' -> '{stagedPath}' ({asset.bytes.Length} bytes)");
-
-            Addressables.Release(handle);
-
-            Init(stagedPath);
-        }
-
-        static void TryDeleteStagedFile(string path)
-        {
-            try
-            {
-                File.Delete(path);
-            }
-            catch (IOException e)
-            {
-                Debug.LogWarning($"[VtkFrameReader] Failed to delete staged temp file '{path}': {e.Message}");
-            }
+            return await Task.Run(() => ParseCsv(asset.text, address));
         }
 
         // Bridges VtkUnstructuredGridReader's callback-based BuildData onto an
@@ -235,11 +200,26 @@ namespace Monospark
             return tcs.Task;
         }
 
+        // Disk entry point: FilePath, streamed rather than loaded whole (a CSV
+        // export can be large).
         (Vector3[] points, float[] values) ParseCsv(CancellationToken cancellationToken)
         {
             using var reader = new StreamReader(FilePath, Encoding.UTF8, true, StreamBufferSize);
+            return ParseCsv(reader, FilePath, cancellationToken);
+        }
 
-            string headerLine = reader.ReadLine() ?? throw new InvalidDataException($"{FilePath} is empty.");
+        // Addressable entry point: content is already fully in memory (a
+        // TextAsset's .text), so there's no file/stream to open -- just wrap
+        // it in a StringReader and run the same line-by-line parse below.
+        (Vector3[] points, float[] values) ParseCsv(string content, string sourceName)
+        {
+            using var reader = new StringReader(content);
+            return ParseCsv(reader, sourceName, CancellationToken.None);
+        }
+
+        (Vector3[] points, float[] values) ParseCsv(TextReader reader, string sourceName, CancellationToken cancellationToken)
+        {
+            string headerLine = reader.ReadLine() ?? throw new InvalidDataException($"{sourceName} is empty.");
             string[] headers = SplitCsvLine(headerLine);
 
             int valueIndex = FindColumn(headers, CsvValueColumn);
@@ -248,9 +228,9 @@ namespace Monospark
             int zIndex = FindColumn(headers, "Z");
 
             if (valueIndex < 0)
-                throw new KeyNotFoundException($"Column '{CsvValueColumn}' was not found in {FilePath}.");
+                throw new KeyNotFoundException($"Column '{CsvValueColumn}' was not found in {sourceName}.");
             if (xIndex < 0 || yIndex < 0 || zIndex < 0)
-                throw new KeyNotFoundException($"X/Y/Z columns were not found in {FilePath}.");
+                throw new KeyNotFoundException($"X/Y/Z columns were not found in {sourceName}.");
 
             int maxIndex = Mathf.Max(Mathf.Max(valueIndex, xIndex), Mathf.Max(yIndex, zIndex));
 
@@ -274,7 +254,7 @@ namespace Monospark
                 valueList.Add(ParseFloat(tokens[valueIndex]));
             }
 
-            Debug.Log($"[VtkFrameReader] Read {pointList.Count} points from '{FilePath}' (value column '{headers[valueIndex].Trim()}')");
+            Debug.Log($"[VtkFrameReader] Read {pointList.Count} points from '{sourceName}' (value column '{headers[valueIndex].Trim()}')");
 
             return (pointList.ToArray(), valueList.ToArray());
         }
