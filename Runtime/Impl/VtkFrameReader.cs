@@ -1,10 +1,9 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
-using System.Threading;
-using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.AddressableAssets;
 using UnityEngine.ResourceManagement.AsyncOperations;
@@ -17,8 +16,8 @@ namespace Monospark
     // splits frames.raw from frames_meta.json). The source is either Init'd as
     // a plain path (disk / InitFromStreamingAssets) or InitFromAddressable'd --
     // an Addressable source is always CSV, loaded as a TextAsset and parsed
-    // straight from its .text (see LoadAddressableCsvAsync), no temp file
-    // involved. A FilePath source picks its format from the file's extension:
+    // straight from its .text (see BuildDataRoutine), no temp file involved.
+    // A FilePath source picks its format from the file's extension:
     //   .vtk - a legacy ASCII VTK UNSTRUCTURED_GRID file (e.g. room.vtk).
     //          Parsing is delegated to VtkUnstructuredGridReader itself --
     //          same format it already reads, no reason to duplicate that
@@ -45,7 +44,7 @@ namespace Monospark
 
         // Which axis the file's raw X/Y/Z treats as "up" -- see WorldUpAxis.
         // Applied to .csv points here, and forwarded to the inner
-        // VtkUnstructuredGridReader for .vtk (ReadVtkAsTexture3D).
+        // VtkUnstructuredGridReader for .vtk (see BuildDataRoutine).
         public WorldUpAxis WorldUp { get; set; } = WorldUpAxis.Y;
 
         // Physical bounds size (world units) of the source file's points --
@@ -55,59 +54,128 @@ namespace Monospark
         // voxel-grid resolution.
         public Vector3 DataSize { get; private set; }
 
-        // Runs the blocking file read on a background thread so callers (e.g. a
-        // MonoBehaviour's Start) never stall a frame, then builds the Texture3D
-        // back on the calling (main) thread once the await resumes -- Unity's
-        // Texture3D/SetPixels/Apply can't run off it -- and hands the result
-        // back through the callback per DataConverter's async contract.
-        public override async void BuildData(OnProcessTex3DData callback)
+        // Runs entirely as a coroutine (no async/Task) so every step -- the
+        // Addressables load, TextAsset.text, CSV/VTK parsing, Texture3D build --
+        // stays on the main thread, which Unity API (TextAsset.text/.bytes,
+        // Texture3D.SetPixels/Apply) requires anyway. VtkFrameReader isn't a
+        // MonoBehaviour, so CoroutineRunner hosts the coroutine on a hidden
+        // helper GameObject instead -- callers keep calling BuildData exactly
+        // as before, nothing about this method's signature changes.
+        public override void BuildData(OnProcessTex3DData callback)
         {
-            try
+            CoroutineRunner.Run(BuildDataRoutine(callback));
+        }
+
+        IEnumerator BuildDataRoutine(OnProcessTex3DData callback)
+        {
+            callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0f }, null);
+
+            Texture3D texture = null;
+            Exception error = null;
+
+            if (!string.IsNullOrEmpty(AddressableKey))
             {
-                callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0f }, null);
+                // Addressable source is always a .csv TextAsset, parsed
+                // straight from its in-memory .text -- no FilePath, no temp
+                // file, no format dispatch (that's only needed for the
+                // FilePath cases below, which can also be .vtk).
+                AsyncOperationHandle<TextAsset> handle = Addressables.LoadAssetAsync<TextAsset>(AddressableKey);
+                yield return handle;
 
-                Texture3D texture;
-
-                if (!string.IsNullOrEmpty(AddressableKey))
+                if (handle.Status != AsyncOperationStatus.Succeeded || handle.Result == null)
                 {
-                    // Addressable source is always a .csv TextAsset, parsed
-                    // straight from its in-memory .text -- no FilePath, no
-                    // temp file, no format dispatch (that's only needed for
-                    // the FilePath cases below, which can also be .vtk).
-                    (Vector3[] points, float[] values) = await LoadAddressableCsvAsync(AddressableKey);
-                    texture = BuildCsvTexture(points, values, $"addressable '{AddressableKey}'", callback);
+                    error = new FileNotFoundException(
+                        $"Addressable '{AddressableKey}' could not be loaded as a TextAsset.", AddressableKey);
                 }
                 else
                 {
-                    if (!File.Exists(FilePath))
-                        throw new FileNotFoundException($"File not found: {FilePath}", FilePath);
-
-                    string extension = Path.GetExtension(FilePath);
-
-                    if (extension.Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                    try
                     {
-                        (Vector3[] points, float[] values) = await Task.Run(() => ParseCsv(CancellationToken.None));
-                        texture = BuildCsvTexture(points, values, FilePath, callback);
+                        (Vector3[] points, float[] values) = ParseCsv(handle.Result.text, AddressableKey);
+                        texture = BuildCsvTexture(points, values, $"addressable '{AddressableKey}'", callback);
                     }
-                    else if (extension.Equals(".vtk", StringComparison.OrdinalIgnoreCase))
+                    catch (Exception e)
                     {
-                        texture = await ReadVtkAsTexture3D();
-                    }
-                    else
-                    {
-                        throw new NotSupportedException(
-                            $"{nameof(VtkFrameReader)} only reads .vtk or .csv files, got '{extension}' ({FilePath}).");
+                        error = e;
                     }
                 }
-
-                Debug.Log($"[VtkFrameReader] Built texture: {texture.width}x{texture.height}x{texture.depth}");
-                callback?.Invoke(new Progress { Status = eStatus.SUCCESS, ProgressValue = 1f }, texture);
             }
-            catch (Exception e)
+            else if (!File.Exists(FilePath))
             {
-                Debug.LogError($"[VtkFrameReader] BuildData failed (AddressableKey='{AddressableKey}', FilePath='{FilePath}'): {e}");
-                callback?.Invoke(new Progress { Status = eStatus.ERROR, ProgressValue = 0f }, null);
+                error = new FileNotFoundException($"File not found: {FilePath}", FilePath);
             }
+            else
+            {
+                string extension = Path.GetExtension(FilePath);
+
+                if (extension.Equals(".csv", StringComparison.OrdinalIgnoreCase))
+                {
+                    try
+                    {
+                        (Vector3[] points, float[] values) = ParseCsv();
+                        texture = BuildCsvTexture(points, values, FilePath, callback);
+                    }
+                    catch (Exception e)
+                    {
+                        error = e;
+                    }
+                }
+                else if (extension.Equals(".vtk", StringComparison.OrdinalIgnoreCase))
+                {
+                    // ParseAllFields = false: this instance is only ever asked
+                    // for FieldName's Texture3D (never BuildData(OnProcessBufferData)),
+                    // so every OTHER SCALARS/VECTORS section in the file (e.g.
+                    // room.vtk's unused Pressure/Velocity, on top of
+                    // Temperature) gets skipped instead of fully parsed -- a
+                    // large chunk of the total parse time for a file with
+                    // several per-cell fields.
+                    var inner = new VtkUnstructuredGridReader { FieldName = FieldName, ParseAllFields = false, WorldUp = WorldUp };
+                    inner.Init(FilePath);
+
+                    bool innerDone = false;
+                    Texture3D innerTexture = null;
+                    Exception innerError = null;
+
+                    inner.BuildData((progress, tex) =>
+                    {
+                        switch (progress.Status)
+                        {
+                            case eStatus.SUCCESS:
+                                DataSize = inner.Size;
+                                innerTexture = tex;
+                                innerDone = true;
+                                break;
+                            case eStatus.ERROR:
+                                innerError = new Exception($"Failed to read '{FilePath}' as an unstructured grid.");
+                                innerDone = true;
+                                break;
+                        }
+                    });
+
+                    while (!innerDone)
+                        yield return null;
+
+                    if (innerError != null)
+                        error = innerError;
+                    else
+                        texture = innerTexture;
+                }
+                else
+                {
+                    error = new NotSupportedException(
+                        $"{nameof(VtkFrameReader)} only reads .vtk or .csv files, got '{extension}' ({FilePath}).");
+                }
+            }
+
+            if (error != null)
+            {
+                Debug.LogError($"[VtkFrameReader] BuildData failed (AddressableKey='{AddressableKey}', FilePath='{FilePath}'): {error}");
+                callback?.Invoke(new Progress { Status = eStatus.ERROR, ProgressValue = 0f }, null);
+                yield break;
+            }
+
+            Debug.Log($"[VtkFrameReader] Built texture: {texture.width}x{texture.height}x{texture.depth}");
+            callback?.Invoke(new Progress { Status = eStatus.SUCCESS, ProgressValue = 1f }, texture);
         }
 
         // Shared tail of both CSV entry points (disk-file and Addressable):
@@ -145,67 +213,12 @@ namespace Monospark
                 "use VtkFrameSequenceReader instead.");
         }
 
-        // Loads AddressableKey as a TextAsset through Unity's Addressable Asset
-        // System and parses its .text directly as CSV -- no temp file, no
-        // Init()/FilePath bounce. The handle is intentionally never released:
-        // this keeps the TextAsset (and the AssetBundle backing it) resident
-        // instead of releasing it right after one read, since Addressable
-        // sources here are always small point-cloud CSVs meant to stay loaded
-        // for the app's lifetime, not one-off reads.
-        async Task<(Vector3[] points, float[] values)> LoadAddressableCsvAsync(string address)
-        {
-            Debug.Log($"[VtkFrameReader] Loading addressable '{address}' as TextAsset...");
-
-            AsyncOperationHandle<TextAsset> handle = Addressables.LoadAssetAsync<TextAsset>(address);
-            TextAsset asset = await handle.Task;
-
-            Debug.Log($"[VtkFrameReader] Addressable '{address}' load finished: status={handle.Status}, " +
-                      $"asset={(asset == null ? "null" : asset.name)}, chars={(asset == null ? -1 : asset.text.Length)}");
-
-            if (handle.Status != AsyncOperationStatus.Succeeded || asset == null)
-                throw new FileNotFoundException($"Addressable '{address}' could not be loaded as a TextAsset.", address);
-
-            return await Task.Run(() => ParseCsv(asset.text, address));
-        }
-
-        // Bridges VtkUnstructuredGridReader's callback-based BuildData onto an
-        // awaitable, so the .vtk branch above can sit in the same async flow
-        // as the .csv branch.
-        Task<Texture3D> ReadVtkAsTexture3D()
-        {
-            var tcs = new TaskCompletionSource<Texture3D>();
-
-            // ParseAllFields = false: this instance is only ever asked for
-            // FieldName's Texture3D (never BuildData(OnProcessBufferData)),
-            // so every OTHER SCALARS/VECTORS section in the file (e.g.
-            // room.vtk's unused Pressure/Velocity, on top of Temperature) gets
-            // skipped instead of fully parsed -- a large chunk of the total
-            // parse time for a file with several per-cell fields.
-            var inner = new VtkUnstructuredGridReader { FieldName = FieldName, ParseAllFields = false, WorldUp = WorldUp };
-            inner.Init(FilePath);
-            inner.BuildData((progress, texture) =>
-            {
-                switch (progress.Status)
-                {
-                    case eStatus.SUCCESS:
-                        DataSize = inner.Size;
-                        tcs.TrySetResult(texture);
-                        break;
-                    case eStatus.ERROR:
-                        tcs.TrySetException(new Exception($"Failed to read '{FilePath}' as an unstructured grid."));
-                        break;
-                }
-            });
-
-            return tcs.Task;
-        }
-
         // Disk entry point: FilePath, streamed rather than loaded whole (a CSV
         // export can be large).
-        (Vector3[] points, float[] values) ParseCsv(CancellationToken cancellationToken)
+        (Vector3[] points, float[] values) ParseCsv()
         {
             using var reader = new StreamReader(FilePath, Encoding.UTF8, true, StreamBufferSize);
-            return ParseCsv(reader, FilePath, cancellationToken);
+            return ParseCsv(reader, FilePath);
         }
 
         // Addressable entry point: content is already fully in memory (a
@@ -214,10 +227,10 @@ namespace Monospark
         (Vector3[] points, float[] values) ParseCsv(string content, string sourceName)
         {
             using var reader = new StringReader(content);
-            return ParseCsv(reader, sourceName, CancellationToken.None);
+            return ParseCsv(reader, sourceName);
         }
 
-        (Vector3[] points, float[] values) ParseCsv(TextReader reader, string sourceName, CancellationToken cancellationToken)
+        (Vector3[] points, float[] values) ParseCsv(TextReader reader, string sourceName)
         {
             string headerLine = reader.ReadLine() ?? throw new InvalidDataException($"{sourceName} is empty.");
             string[] headers = SplitCsvLine(headerLine);
@@ -240,7 +253,6 @@ namespace Monospark
             string line;
             while ((line = reader.ReadLine()) != null)
             {
-                cancellationToken.ThrowIfCancellationRequested();
                 if (line.Length == 0)
                     continue;
 
@@ -362,6 +374,29 @@ namespace Monospark
             int resY = Mathf.Clamp(Mathf.RoundToInt(size.y / voxelEdge), MinResolution, MaxResolution);
             int resZ = Mathf.Clamp(Mathf.RoundToInt(size.z / voxelEdge), MinResolution, MaxResolution);
             return (resX, resY, resZ);
+        }
+
+        // Minimal MonoBehaviour host for BuildData's coroutine -- VtkFrameReader
+        // is a plain C# class (not a MonoBehaviour, unlike DataConvertManager),
+        // and StartCoroutine only exists on MonoBehaviour. Lazily creates one
+        // hidden GameObject the first time it's needed (HideAndDontSave keeps
+        // it alive across scene loads and out of the Hierarchy/scene file) and
+        // reuses it for every call after that, so BuildData's signature and
+        // every existing caller (CFDFactory, DataConvertManager, TestAction)
+        // stay unchanged.
+        class CoroutineRunner : MonoBehaviour
+        {
+            static CoroutineRunner _instance;
+
+            public static void Run(IEnumerator routine)
+            {
+                if (_instance == null)
+                {
+                    var host = new GameObject(nameof(CoroutineRunner)) { hideFlags = HideFlags.HideAndDontSave };
+                    _instance = host.AddComponent<CoroutineRunner>();
+                }
+                _instance.StartCoroutine(routine);
+            }
         }
     }
 }
