@@ -10,6 +10,17 @@ namespace Monospark
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
 
+#if UNITY_WEBGL
+        // VolumeRenderer.shader's scene-depth occlusion clip reads back
+        // unreliable depth on (at least some) WebGL2/ANGLE GPUs, which made
+        // the volume render as if hidden behind every opaque object on screen
+        // instead of in front of it -- see VolumeRenderer_WebGL.shader's
+        // header comment. #if UNITY_WEBGL (not a runtime Application.platform
+        // check) so this also swaps while testing in the Editor with WebGL as
+        // the active Build Target, not only in an actual exported build.
+        const string WebGLShaderName = "Custom/VolumeRenderer_WebGL";
+#endif
+
         public Material Material;
         public Transform TargetCube; // optional: scaled to worldSize, or texture dims * FallbackScale if worldSize is unknown
 
@@ -20,6 +31,24 @@ namespace Monospark
         public float FallbackScale = 0.1f;
 
         Texture3D _texture;
+
+        void Awake()
+        {
+#if UNITY_WEBGL
+            if (Material == null)
+                return;
+
+            Shader webglShader = Shader.Find(WebGLShaderName);
+            if (webglShader == null)
+            {
+                Debug.LogWarning($"[VtkFrameRenderer] Shader '{WebGLShaderName}' not found -- staying on " +
+                                  $"'{Material.shader.name}'. Make sure VolumeRenderer_WebGL.shader is included in the build.");
+                return;
+            }
+
+            SetShader(webglShader);
+#endif
+        }
 
         // TargetCube is what's actually drawn (a normal MeshRenderer), so
         // visibility toggles its Renderer directly.
