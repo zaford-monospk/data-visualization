@@ -6,14 +6,18 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
+using UnityEngine.AddressableAssets;
+using UnityEngine.ResourceManagement.AsyncOperations;
 
 namespace Monospark
 {
     // Reads a SINGLE static snapshot file -- FilePath is one file, exactly
     // like VtkUnstructuredGridReader, not a directory (that's only
     // VtkFrameSequenceReader, which needs a directory because its format
-    // splits frames.raw from frames_meta.json). Format is picked from
-    // FilePath's extension:
+    // splits frames.raw from frames_meta.json). The source is either Init'd as
+    // a plain path (disk / InitFromStreamingAssets) or InitFromAddressable'd,
+    // in which case BuildData stages the Addressable to a temp file first --
+    // see StageAddressableAsync. Format is picked from the file's extension:
     //   .vtk - a legacy ASCII VTK UNSTRUCTURED_GRID file (e.g. room.vtk).
     //          Parsing is delegated to VtkUnstructuredGridReader itself --
     //          same format it already reads, no reason to duplicate that
@@ -57,9 +61,20 @@ namespace Monospark
         // back through the callback per DataConverter's async contract.
         public override async void BuildData(OnProcessTex3DData callback)
         {
+            string stagedPath = null;
             try
             {
                 callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0f }, null);
+
+                // Addressable source: stage it to a temp file and Init() this
+                // instance onto that file, so everything below (and, for .vtk,
+                // the inner VtkUnstructuredGridReader) keeps using the exact
+                // same plain-File-I/O path as the disk/StreamingAssets cases.
+                if (!string.IsNullOrEmpty(AddressableKey))
+                {
+                    await StageAddressableAsync(AddressableKey);
+                    stagedPath = FilePath;
+                }
 
                 if (!File.Exists(FilePath))
                     throw new FileNotFoundException($"File not found: {FilePath}", FilePath);
@@ -98,6 +113,13 @@ namespace Monospark
                 Debug.LogException(e);
                 callback?.Invoke(new Progress { Status = eStatus.ERROR, ProgressValue = 0f }, null);
             }
+            finally
+            {
+                // Only ever set when this run staged an Addressable itself --
+                // never deletes a caller-supplied disk/StreamingAssets FilePath.
+                if (stagedPath != null)
+                    TryDeleteStagedFile(stagedPath);
+            }
         }
 
         // This reader produces a single static Texture3D, not the raw
@@ -117,6 +139,49 @@ namespace Monospark
             throw new NotSupportedException(
                 $"{nameof(VtkFrameReader)} does not produce a {nameof(VtkFrameSequenceData)}; " +
                 "use VtkFrameSequenceReader instead.");
+        }
+
+        // Loads AddressableKey as a TextAsset through Unity's Addressable Asset
+        // System and writes its bytes to a temp file, then Init()s this instance
+        // onto that file -- letting the rest of BuildData reuse the exact same
+        // plain-File-I/O parsing path as the disk/StreamingAssets cases instead
+        // of a separate in-memory branch. Note: for this to work the source
+        // needs to actually import as a TextAsset -- Unity's default importer
+        // only recognizes a handful of text extensions (.csv, .txt, .bytes,
+        // .json, ...) that way, and .vtk is NOT one of them, so a .vtk
+        // Addressable typically needs an extra ".bytes" suffix (or a custom
+        // importer) to be loadable here at all.
+        async Task StageAddressableAsync(string address)
+        {
+            AsyncOperationHandle<TextAsset> handle = Addressables.LoadAssetAsync<TextAsset>(address);
+            TextAsset asset = await handle.Task;
+
+            if (handle.Status != AsyncOperationStatus.Succeeded || asset == null)
+            {
+                Addressables.Release(handle);
+                throw new FileNotFoundException($"Addressable '{address}' could not be loaded as a TextAsset.", address);
+            }
+
+            string extension = Path.GetExtension(address);
+            string stagedPath = Path.Combine(
+                Application.temporaryCachePath, $"{Path.GetFileNameWithoutExtension(address)}_{Guid.NewGuid():N}{extension}");
+            File.WriteAllBytes(stagedPath, asset.bytes);
+
+            Addressables.Release(handle);
+
+            Init(stagedPath);
+        }
+
+        static void TryDeleteStagedFile(string path)
+        {
+            try
+            {
+                File.Delete(path);
+            }
+            catch (IOException e)
+            {
+                Debug.LogWarning($"[VtkFrameReader] Failed to delete staged temp file '{path}': {e.Message}");
+            }
         }
 
         // Bridges VtkUnstructuredGridReader's callback-based BuildData onto an

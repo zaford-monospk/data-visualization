@@ -41,6 +41,22 @@ namespace Monospark
             Init(Path.Combine(Application.streamingAssetsPath, relativePath));
         }
 
+        // Address/key of an Addressable asset to load instead of a plain
+        // FilePath -- set by InitFromAddressable. Only VtkFrameReader currently
+        // reads this; every other converter still expects Init/InitFromStreamingAssets.
+        public string AddressableKey { get; private set; }
+
+        // Marks this instance to load its data through Unity's Addressable Asset
+        // System instead of plain File I/O -- unlike InitFromStreamingAssets,
+        // this reaches content packed into a remote/local Addressable bundle on
+        // every platform (including Android/WebGL, where StreamingAssets isn't a
+        // reachable folder). `address` is the key/label the asset was given in
+        // the Addressables Groups window, not a filesystem path.
+        public void InitFromAddressable(string address)
+        {
+            AddressableKey = address;
+        }
+
         public abstract void BuildData(OnProcessTex3DData callback);
         public abstract void BuildData(OnProcessBufferData callback);
         public abstract void BuildData(OnProcessFrameSequenceData callback);

@@ -2,7 +2,9 @@
     "name": "DataVisualization",
     "rootNamespace": "Monospark",
     "references": [
-        "Unity.InputSystem"
+        "Unity.InputSystem",
+        "Unity.Addressables",
+        "Unity.ResourceManager"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
