@@ -186,7 +186,16 @@ Shader "Custom/VolumeRenderer_WebGL"
                         _TemperatureLUT, sampler_TemperatureLUT, float2(lutU, 0.5), 0).rgb;
                     half sampleAlpha = density * (1.0 - accumulatedAlpha);
 
-                    accumulatedColor += sampleColor * sampleAlpha;
+                    // Replace, don't add: the first (closest) sample with any
+                    // density locks in the color for this ray, instead of
+                    // summing every sample's color together (which washes
+                    // into an over-bright blended mess as steps increase).
+                    // Marching is front-to-back, so "accumulatedAlpha is
+                    // still exactly 0" means no sample has contributed yet --
+                    // i.e. this one is the closest.
+                    if (accumulatedAlpha <= 0.0)
+                        accumulatedColor = sampleColor;
+
                     accumulatedAlpha += sampleAlpha;
 
                     samplePos += rayDirOS * stepSize;
