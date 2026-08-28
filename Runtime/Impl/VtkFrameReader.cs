@@ -45,6 +45,7 @@ namespace Monospark
         const int MinResolution = 8;
         const int MaxResolution = 128;
         const int StreamBufferSize = 1 << 20; // 1 MB — fewer underlying reads over a large CSV
+        const float KelvinToCelsiusOffset = 273.15f;
 
         // .vtk SCALARS field name, forwarded to the inner VtkUnstructuredGridReader.
         public string FieldName { get; set; } = "Temperature(C)";
@@ -86,6 +87,15 @@ namespace Monospark
         // to the data's actual real-world extents instead of guessing from
         // voxel-grid resolution.
         public Vector3 DataSize { get; private set; }
+
+        // Raw (un-normalized, Celsius after any Kelvin conversion) min/max of
+        // the voxelized value across every point/cell -- valid once
+        // BuildData(OnProcessTex3DData)'s callback has fired with SUCCESS.
+        // Lets a caller (e.g. VtkFrameRenderer.SetLutTemperatureRange)
+        // convert a real Celsius value into the Texture3D's normalized 0..1
+        // space the same way ToTexture3D itself does.
+        public float ValueMin { get; private set; }
+        public float ValueMax { get; private set; }
 
         // Cached CSV parse, populated once by EnsureCsvParsedRoutine and
         // reused by both BuildData overloads -- a reader used for both a
@@ -166,6 +176,8 @@ namespace Monospark
                     {
                         case eStatus.SUCCESS:
                             DataSize = inner.Size;
+                            ValueMin = inner.ValueMin;
+                            ValueMax = inner.ValueMax;
                             innerTexture = tex;
                             innerDone = true;
                             break;
@@ -214,7 +226,10 @@ namespace Monospark
 
             callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0.9f }, null);
 
-            return ToTexture3D(points, values, bounds);
+            (Texture3D texture, float valueMin, float valueMax) = ToTexture3D(points, values, bounds);
+            ValueMin = valueMin;
+            ValueMax = valueMax;
+            return texture;
         }
 
         // Builds a VtkUnstructuredGridData from this CSV's Velocity[i]/[j]/[k]
@@ -442,6 +457,18 @@ namespace Monospark
             if (xIndex < 0 || yIndex < 0 || zIndex < 0)
                 throw new KeyNotFoundException($"X/Y/Z columns were not found in {sourceName}.");
 
+            // CFD exports store Temperature in Kelvin ("Temperature (K)"),
+            // not Celsius -- convert at parse time so every downstream
+            // consumer (Texture3D voxelization, BuildVelocityGridData's
+            // CellScalars["Temperature(C)"], TestUI's "°C" clip-range
+            // display) sees actual Celsius instead of silently working with
+            // Kelvin under a Celsius-implying name. Detected from the
+            // MATCHED column's own header text, not hardcoded to
+            // CsvValueColumn's default "Temperature" -- CsvValueColumn can
+            // be repointed at a non-temperature column (e.g. "RH (%)"),
+            // which must never get this conversion.
+            bool valueIsKelvin = headers[valueIndex].IndexOf("(K)", StringComparison.OrdinalIgnoreCase) >= 0;
+
             // Velocity[i]/[j]/[k] are optional -- present in flow-field
             // exports (e.g. Test_Room_16000.csv) but not boundary-condition
             // ones (e.g. Summer1_Boundary.csv). Only looked for at all when
@@ -480,7 +507,11 @@ namespace Monospark
                 Vector3 point = new Vector3(
                     ParseFloat(tokens[xIndex]), ParseFloat(tokens[yIndex]), ParseFloat(tokens[zIndex]));
                 pointList.Add(WorldUp.ToUnity(point));
-                valueList.Add(ParseFloat(tokens[valueIndex]));
+
+                float value = ParseFloat(tokens[valueIndex]);
+                if (valueIsKelvin)
+                    value -= KelvinToCelsiusOffset;
+                valueList.Add(value);
 
                 if (wantVelocity)
                 {
@@ -491,7 +522,8 @@ namespace Monospark
             }
 
             Debug.Log($"[VtkFrameReader] Read {pointList.Count} points from '{sourceName}' " +
-                      $"(value column '{headers[valueIndex].Trim()}'{(wantVelocity ? ", with velocity" : "")})");
+                      $"(value column '{headers[valueIndex].Trim()}'{(valueIsKelvin ? ", K->C converted" : "")}" +
+                      $"{(wantVelocity ? ", with velocity" : "")})");
 
             return (pointList.ToArray(), valueList.ToArray(), wantVelocity ? velocityList.ToArray() : null);
         }
@@ -531,7 +563,9 @@ namespace Monospark
         // Same bucket-and-average voxelization as VtkUnstructuredGridReader.ToTexture3D,
         // just against raw CSV points instead of cell centroids -- a point-cloud
         // export has no cell connectivity, so each row already IS a sample.
-        static Texture3D ToTexture3D(Vector3[] points, float[] values, Bounds bounds)
+        // Also returns the raw (un-normalized) min/max values voxelized --
+        // BuildCsvTexture caches these on ValueMin/ValueMax.
+        static (Texture3D texture, float valueMin, float valueMax) ToTexture3D(Vector3[] points, float[] values, Bounds bounds)
         {
             (int resX, int resY, int resZ) = ComputeResolution(points.Length, bounds.size);
 
@@ -548,9 +582,15 @@ namespace Monospark
             for (int i = 0; i < points.Length; i++)
             {
                 Vector3 p = points[i];
-                int vx = Mathf.Clamp((int)((p.x - min.x) / size.x * resX), 0, resX - 1);
-                int vy = Mathf.Clamp((int)((p.y - min.y) / size.y * resY), 0, resY - 1);
-                int vz = Mathf.Clamp((int)((p.z - min.z) / size.z * resZ), 0, resZ - 1);
+                // resX/resY/resZ == 1 (a degenerate/near-zero axis -- see
+                // ComputeResolution) skips the division: with size.x == 0
+                // (exactly, once a CFD "plane cut" export's near-identical
+                // X values round to the same float) (p.x - min.x) / size.x
+                // is 0/0 == NaN, which would otherwise scatter every point
+                // into whatever fixed slice (int)NaN happens to cast to.
+                int vx = resX == 1 ? 0 : Mathf.Clamp((int)((p.x - min.x) / size.x * resX), 0, resX - 1);
+                int vy = resY == 1 ? 0 : Mathf.Clamp((int)((p.y - min.y) / size.y * resY), 0, resY - 1);
+                int vz = resZ == 1 ? 0 : Mathf.Clamp((int)((p.z - min.z) / size.z * resZ), 0, resZ - 1);
                 int index = vx + vy * resX + vz * resX * resY;
 
                 float value = values[i];
@@ -584,8 +624,30 @@ namespace Monospark
             texture.SetPixels(colors);
             texture.Apply();
 
-            return texture;
+            return (texture, minValue, maxValue);
         }
+
+        // A CFD "plane cut" export (e.g. Summer1_X1.csv/X2.csv, where every
+        // row shares the same X) has no real spatial extent along that axis
+        // at all -- once such near-identical values round to the same
+        // float, bounds.size on that axis comes out exactly 0. Clamping
+        // that up to MinResolution (the naive Mathf.Clamp below) would still
+        // try to divide by that 0 size per-point in ToTexture3D (0/0 ==
+        // NaN), scattering every single point into whatever one fixed slice
+        // (int)NaN happens to cast to and leaving the other MinResolution-1
+        // slices completely empty -- a thin sliver of real data pinned to
+        // one edge of the padded box, with the rest empty, which is why the
+        // raymarched result looked different depending on which side of
+        // that axis the camera was on (one direction hits the sliver almost
+        // immediately, the other crosses mostly-empty space first). Below
+        // DegenerateAxisSize, treat the axis as having exactly ONE voxel
+        // instead -- there's no real resolution to resolve there, so every
+        // point correctly lands in that single slice, which then fills the
+        // box's entire (physically thin) extent uniformly. (Separate from,
+        // but related to, VtkFrameRenderer.MinAxisSize, which pads the
+        // rendered box's world-space thickness so its Transform scale is
+        // never truly zero -- this is about the texture's own voxel grid.)
+        const float DegenerateAxisSize = 1e-5f;
 
         // Derives a near-cubic-voxel resolution from the data itself, same as
         // VtkUnstructuredGridReader.ComputeResolution: voxel edge length = cube
@@ -595,10 +657,17 @@ namespace Monospark
             float volume = Mathf.Max(size.x * size.y * size.z, Mathf.Epsilon);
             float voxelEdge = Mathf.Pow(volume / Mathf.Max(sampleCount, 1), 1f / 3f);
 
-            int resX = Mathf.Clamp(Mathf.RoundToInt(size.x / voxelEdge), MinResolution, MaxResolution);
-            int resY = Mathf.Clamp(Mathf.RoundToInt(size.y / voxelEdge), MinResolution, MaxResolution);
-            int resZ = Mathf.Clamp(Mathf.RoundToInt(size.z / voxelEdge), MinResolution, MaxResolution);
-            return (resX, resY, resZ);
+            return (
+                ComputeAxisResolution(size.x, voxelEdge),
+                ComputeAxisResolution(size.y, voxelEdge),
+                ComputeAxisResolution(size.z, voxelEdge));
+        }
+
+        static int ComputeAxisResolution(float axisSize, float voxelEdge)
+        {
+            if (axisSize < DegenerateAxisSize)
+                return 1;
+            return Mathf.Clamp(Mathf.RoundToInt(axisSize / voxelEdge), MinResolution, MaxResolution);
         }
 
         // Minimal MonoBehaviour host for BuildData's coroutine -- VtkFrameReader

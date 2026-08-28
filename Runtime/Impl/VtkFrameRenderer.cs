@@ -20,6 +20,8 @@ namespace Monospark
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
         static readonly int VolumeWorldToLocalId = Shader.PropertyToID("_VolumeWorldToLocal");
+        static readonly int LutStartTemperatureId = Shader.PropertyToID("_LutStartTemperature");
+        static readonly int LutEndTemperatureId = Shader.PropertyToID("_LutEndTemperature");
 
 #if UNITY_WEBGL
         // VolumeRenderer.shader's scene-depth occlusion clip reads back
@@ -62,6 +64,15 @@ namespace Monospark
         public float MinAxisSize = 0.05f;
 
         Texture3D _texture;
+
+        // Raw (Celsius) value range the currently-displayed Texture3D was
+        // normalized against -- set by Set() (from VtkFrameReader.ValueMin/
+        // ValueMax) so SetLutTemperatureRange can convert a real Celsius
+        // value into the shader's normalized 0..1 _LutStartTemperature/
+        // _LutEndTemperature space. _valueMax defaults to 1 (not 0) so the
+        // range is never zero-width before Set() has run even once.
+        float _valueMin;
+        float _valueMax = 1f;
 
         // Tracked separately from the public Material/SliceMaterial fields so
         // OnDestroy only ever destroys the instance THIS component created --
@@ -192,13 +203,24 @@ namespace Monospark
         // worldSize is the source data's real-world extent (VtkFrameReader.DataSize,
         // when its source file had usable bounds) -- pass null/omit when
         // that isn't known, which falls back to the texture's own voxel-grid
-        // resolution scaled down by FallbackScale.
-        public void Set(Texture3D texture, Vector3? worldSize = null)
+        // resolution scaled down by FallbackScale. valueRange is the raw
+        // (Celsius) min/max the source's Texture3D was normalized against
+        // (VtkFrameReader.ValueMin/ValueMax) -- required for
+        // SetLutTemperatureRange's Celsius -> normalized conversion to be
+        // correct; pass null/omit only if that method will never be called
+        // on this instance.
+        public void Set(Texture3D texture, Vector3? worldSize = null, (float min, float max)? valueRange = null)
         {
             if (_texture != null && _texture != texture)
                 Destroy(_texture);
 
             _texture = texture;
+
+            if (valueRange.HasValue)
+            {
+                _valueMin = valueRange.Value.min;
+                _valueMax = valueRange.Value.max;
+            }
 
             if (Material != null)
                 Material.SetTexture(VolumeId, _texture);
@@ -217,6 +239,31 @@ namespace Monospark
                 size.z = Mathf.Max(size.z, MinAxisSize);
 
                 TargetCube.localScale = size;
+            }
+        }
+
+        // Sets the shader's _LutStartTemperature/_LutEndTemperature (on both
+        // Material and SliceMaterial, so the raymarched cube and the slice
+        // plane stay in sync) from real Celsius values instead of the
+        // shader's raw normalized 0..1 space -- converted using the value
+        // range Set() was given (VtkFrameReader.ValueMin/ValueMax). E.g.
+        // SetLutTemperatureRange(18f, 26f) makes 18°C map to the LUT's start
+        // and 26°C to its end, regardless of the data's actual full range.
+        public void SetLutTemperatureRange(float startCelsius, float endCelsius)
+        {
+            float span = Mathf.Max(_valueMax - _valueMin, Mathf.Epsilon);
+            float start01 = Mathf.Clamp01((startCelsius - _valueMin) / span);
+            float end01 = Mathf.Clamp01((endCelsius - _valueMin) / span);
+
+            if (Material != null)
+            {
+                Material.SetFloat(LutStartTemperatureId, start01);
+                Material.SetFloat(LutEndTemperatureId, end01);
+            }
+            if (SliceMaterial != null)
+            {
+                SliceMaterial.SetFloat(LutStartTemperatureId, start01);
+                SliceMaterial.SetFloat(LutEndTemperatureId, end01);
             }
         }
 

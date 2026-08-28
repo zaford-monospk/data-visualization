@@ -47,6 +47,15 @@ namespace Monospark
         // real-world extents instead of guessing from voxel-grid resolution.
         public Vector3 Size => _bounds.size;
 
+        // Raw (un-normalized) min/max of FieldName's values across all cells
+        // -- valid once BuildData(OnProcessTex3DData)'s callback has fired
+        // with SUCCESS. Lets a caller (e.g. VtkFrameRenderer) convert a
+        // real-world value (e.g. a Celsius temperature) into the Texture3D's
+        // normalized 0..1 space the same way ToTexture3D itself does,
+        // instead of duplicating/guessing that range.
+        public float ValueMin { get; private set; }
+        public float ValueMax { get; private set; }
+
         int _cellCount;
         Bounds _bounds;
         Vector3[] _cellCentroids;
@@ -465,6 +474,9 @@ namespace Monospark
                 float normalized = (voxelSum[i] / voxelHits[i] - minValue) / range;
                 colors[i] = new Color(normalized, normalized, normalized, 1f);
             }
+
+            ValueMin = minValue;
+            ValueMax = maxValue;
 
             // RGBAHalf, not RFloat: RFloat is single-channel and would silently
             // drop the alpha (occupancy) channel written above.

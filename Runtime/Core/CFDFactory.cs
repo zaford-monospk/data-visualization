@@ -171,11 +171,14 @@ namespace Monospark
                 throw new MissingComponentException($"{_raymarchVolumeStatic} prefab has no {nameof(VtkFrameRenderer)}.");
 
             // Constructed directly (not GetMap<VtkFrameReader>) so WorldUp can
-            // be set before Init/BuildData run, and DataSize is still readable
-            // off this instance after BuildData's callback fires -- reader.DataSize
-            // is the source file's real-world extent when it had usable bounds
-            // (.vtk POINTS / .csv X-Y-Z), which sizes TargetCube far more
-            // meaningfully than its voxel-grid resolution.
+            // be set before Init/BuildData run, and DataSize/ValueMin/ValueMax
+            // are still readable off this instance after BuildData's callback
+            // fires -- reader.DataSize is the source file's real-world extent
+            // when it had usable bounds (.vtk POINTS / .csv X-Y-Z), which
+            // sizes TargetCube far more meaningfully than its voxel-grid
+            // resolution; reader.ValueMin/ValueMax is the raw Celsius range
+            // the Texture3D was normalized against, passed to renderer.Set so
+            // SetLutTemperatureRange can later convert real Celsius values.
             var reader = new VtkFrameReader { WorldUp = worldUp };
 
             void OnTextureReady(DataConverter.Progress progress, Texture3D texture)
@@ -183,7 +186,7 @@ namespace Monospark
                 switch (progress.Status)
                 {
                     case DataConverter.eStatus.SUCCESS:
-                        renderer.Set(texture, reader.DataSize);
+                        renderer.Set(texture, reader.DataSize, (reader.ValueMin, reader.ValueMax));
                         onComplete?.Invoke(true);
                         break;
                     case DataConverter.eStatus.ERROR:

@@ -9,10 +9,13 @@ Shader "Custom/VolumeRenderer"
         _AlphaCutoff("Alpha Cutoff", Range(0, 1)) = 0.99
         _ClipMin("Clip Range Min", Range(0, 1)) = 0
         _ClipMax("Clip Range Max", Range(0, 1)) = 1
-        // 0 = smooth gradient (the original behavior, so existing materials
-        // that predate this property are unaffected). > 0 quantizes the LUT
-        // lookup into that many discrete color bands instead.
-        _ColorSteps("Color Steps (0 = smooth)", Range(0, 64)) = 0
+        // Together, _LutStartTemperature/_LutEndTemperature linearly remap
+        // [start, end] of the normalized temperature onto the LUT's [0, 1] --
+        // a sample AT start maps to U=0, AT end maps to U=1, anything outside
+        // that range clamps to the nearest end's color rather than going out
+        // of bounds. Defaults (0, 1) are the original behavior -- unchanged.
+        _LutStartTemperature("LUT Start Temperature", Range(0, 1)) = 0
+        _LutEndTemperature("LUT End Temperature", Range(0, 1)) = 1
         // Scales the per-pixel ray-start jitter that turns raymarch step
         // banding into noise instead. 1 = original behavior (full jitter);
         // lower toward 0 for a more solid/filled look at the cost of visible
@@ -56,14 +59,20 @@ Shader "Custom/VolumeRenderer"
             TEXTURE2D(_TemperatureLUT);
             SAMPLER(sampler_TemperatureLUT);
 
+            // Keeps the LUT sample position from ever landing exactly on 0
+            // or 1 -- see the _LutStartTemperature/_LutEndTemperature remap
+            // in frag() for why.
+            #define LutEdgeInset 0.001
+
             CBUFFER_START(UnityPerMaterial)
                 float _DensityMultiplier;
                 float _StepCount;
                 float _AlphaCutoff;
                 float _ClipMin;
                 float _ClipMax;
-                float _ColorSteps;
                 float _JitterStrength;
+                float _LutStartTemperature;
+                float _LutEndTemperature;
             CBUFFER_END
 
             struct Attributes
@@ -193,17 +202,19 @@ Shader "Custom/VolumeRenderer"
                     half inRange = step(_ClipMin, volumeSample.x) * step(volumeSample.x, _ClipMax);
                     half density = saturate(volumeSample.x * volumeSample.y * _DensityMultiplier) * inRange;
 
-                    // _ColorSteps > 0 quantizes the LUT lookup into that many
-                    // equal-width bins (discrete color bands) instead of a
-                    // smooth gradient -- each bin samples the LUT at its
-                    // center, so the band boundary is exact regardless of the
-                    // LUT texture's own filter mode.
-                    float lutU = volumeSample.x;
-                    if (_ColorSteps > 0.5)
-                    {
-                        float bin = min(floor(lutU * _ColorSteps), _ColorSteps - 1);
-                        lutU = (bin + 0.5) / _ColorSteps;
-                    }
+                    // Linearly remaps [_LutStartTemperature, _LutEndTemperature]
+                    // onto the LUT's [0, 1] -- max(..., 1e-5) guards the
+                    // divide if End is ever left <= Start (e.g. mid-drag in
+                    // the Inspector) rather than producing Inf/NaN. The result
+                    // is then inset slightly from the literal 0/1 edges --
+                    // sampling AT either edge hits an ambiguous boundary
+                    // position of the LUT texture (precision-dependent
+                    // whether it reads the edge texel or blends past it),
+                    // which can flicker right at the value that exactly
+                    // equals Start/End.
+                    float lutRange = max(_LutEndTemperature - _LutStartTemperature, 1e-5);
+                    float lutU01 = saturate((volumeSample.x - _LutStartTemperature) / lutRange);
+                    float lutU = lerp(LutEdgeInset, 1.0 - LutEdgeInset, lutU01);
 
                     // u = normalized scalar value, v = 0.5 (LUT used as a 1D ramp).
                     half3 sampleColor = SAMPLE_TEXTURE2D_LOD(

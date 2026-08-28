@@ -16,9 +16,12 @@ Shader "Custom/VolumeSlicePlane"
         _DensityMultiplier("Density Multiplier", Range(0, 10)) = 1
         _ClipMin("Clip Range Min", Range(0, 1)) = 0
         _ClipMax("Clip Range Max", Range(0, 1)) = 1
-        // 0 = smooth gradient, > 0 = that many discrete color bands -- same
-        // convention/meaning as VolumeRenderer.shader's _ColorSteps.
-        _ColorSteps("Color Steps (0 = smooth)", Range(0, 64)) = 0
+        // Same convention/meaning as VolumeRenderer.shader's
+        // _LutStartTemperature/_LutEndTemperature: linearly remaps [start,
+        // end] of the normalized value onto the LUT's [0, 1], clamping
+        // anything outside that range to the nearest end's color.
+        _LutStartTemperature("LUT Start Temperature", Range(0, 1)) = 0
+        _LutEndTemperature("LUT End Temperature", Range(0, 1)) = 1
     }
 
     SubShader
@@ -52,11 +55,17 @@ Shader "Custom/VolumeSlicePlane"
             TEXTURE2D(_TemperatureLUT);
             SAMPLER(sampler_TemperatureLUT);
 
+            // Keeps the LUT sample position from ever landing exactly on 0
+            // or 1 -- see the _LutStartTemperature/_LutEndTemperature remap
+            // in frag() for why.
+            #define LutEdgeInset 0.001
+
             CBUFFER_START(UnityPerMaterial)
                 float _DensityMultiplier;
                 float _ClipMin;
                 float _ClipMax;
-                float _ColorSteps;
+                float _LutStartTemperature;
+                float _LutEndTemperature;
             CBUFFER_END
 
             // Set every frame from C# (VtkFrameRenderer.LateUpdate) as
@@ -107,13 +116,16 @@ Shader "Custom/VolumeSlicePlane"
                 half inRange = step(_ClipMin, volumeSample.x) * step(volumeSample.x, _ClipMax);
                 half density = saturate(volumeSample.x * volumeSample.y * _DensityMultiplier) * inRange;
 
-                // Same _ColorSteps discrete-band quantization as VolumeRenderer.shader.
-                float lutU = volumeSample.x;
-                if (_ColorSteps > 0.5)
-                {
-                    float bin = min(floor(lutU * _ColorSteps), _ColorSteps - 1);
-                    lutU = (bin + 0.5) / _ColorSteps;
-                }
+                // Same _LutStartTemperature/_LutEndTemperature remap as
+                // VolumeRenderer.shader -- max(..., 1e-5) guards the divide
+                // if End is ever left <= Start rather than producing Inf/NaN.
+                // The result is then inset slightly from the literal 0/1
+                // edges -- sampling AT either edge hits an ambiguous
+                // boundary position of the LUT texture, which can flicker
+                // right at the value that exactly equals Start/End.
+                float lutRange = max(_LutEndTemperature - _LutStartTemperature, 1e-5);
+                float lutU01 = saturate((volumeSample.x - _LutStartTemperature) / lutRange);
+                float lutU = lerp(LutEdgeInset, 1.0 - LutEdgeInset, lutU01);
 
                 half3 sampleColor = SAMPLE_TEXTURE2D_LOD(
                     _TemperatureLUT, sampler_TemperatureLUT, float2(lutU, 0.5), 0).rgb;
