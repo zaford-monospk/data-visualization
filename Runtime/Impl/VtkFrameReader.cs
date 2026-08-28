@@ -33,9 +33,10 @@ namespace Monospark
     // Texture3D with the same RGBAHalf convention every volume reader in this
     // package uses: .r = normalized scalar value, .a = occupancy (0 where no
     // sample landed). BuildData(OnProcessBufferData) is CSV-only and requires
-    // IncludeVelocity: it downsamples the (potentially 10,000+ row) CSV into a
-    // VtkUnstructuredGridData -- one degenerate single-point "cell" per
-    // occupied VelocityResolution bucket -- so the existing
+    // IncludeVelocity: it filters the (potentially 10,000+ row) CSV down to
+    // rows whose velocity magnitude is at least MinVelocitySpeed -- each
+    // surviving row becomes one degenerate single-point "cell" (no averaging,
+    // unlike Texture3D voxelization) -- so the existing
     // VtkUnstructuredGridRenderer glyph pipeline (built for real .vtk cell
     // data) can display Velocity from a CSV point cloud too, with no changes
     // to that renderer.
@@ -68,15 +69,16 @@ namespace Monospark
         // so changing this afterward has no effect on an already-parsed reader.
         public bool IncludeVelocity { get; set; } = false;
 
-        // Bucket count along the data's LONGEST bounds axis, used ONLY to
-        // downsample the CSV into a manageable number of glyph "cells" for
-        // BuildData(OnProcessBufferData) -- every row landing in the same
-        // bucket is averaged into one glyph. Shorter axes get proportionally
-        // fewer buckets (see ComputeVelocityGridDims), so a long, thin room
-        // isn't distorted into a cube. Independent of the Texture3D's own
-        // ComputeResolution, which is auto-derived from sample count rather
-        // than being directly controllable.
-        public int VelocityResolution { get; set; } = 16;
+        // Minimum velocity magnitude (m/s) a CSV row needs to be included in
+        // BuildData(OnProcessBufferData)'s glyph cells -- the mechanism for
+        // keeping a manageable cell count out of a CSV that can have 10,000+
+        // rows. Filtering by speed (rather than spatially downsampling/
+        // averaging into a coarser grid) keeps every surviving glyph an
+        // actual, undistorted sample instead of a blurred average -- CFD
+        // exports are typically dominated by near-stagnant rows anyway, so a
+        // speed floor is usually also the more meaningful cut. 0 (the
+        // default) includes every row with velocity data.
+        public float MinVelocitySpeed { get; set; } = 0f;
 
         // Physical bounds size (world units) of the source file's points --
         // valid once BuildData's callback has fired with SUCCESS. Lets a
@@ -278,7 +280,7 @@ namespace Monospark
             }
 
             Debug.Log($"[VtkFrameReader] Built {data.Cells.Length} velocity glyph cells from " +
-                      $"'{_csvSourceDescription}' (VelocityResolution={VelocityResolution}, {_csvPoints.Length} source rows).");
+                      $"'{_csvSourceDescription}' (MinVelocitySpeed={MinVelocitySpeed}, {_csvPoints.Length} source rows).");
             callback?.Invoke(new Progress { Status = eStatus.SUCCESS, ProgressValue = 1f }, data);
         }
 
@@ -342,12 +344,12 @@ namespace Monospark
             }
         }
 
-        // Downsamples the raw CSV rows into a VtkUnstructuredGridData -- one
-        // degenerate single-point "cell" per occupied VelocityResolution
-        // bucket (averaging every row that landed in it), so
+        // Filters the raw CSV rows down to ones whose velocity magnitude is
+        // at least MinVelocitySpeed -- each surviving row becomes its own
+        // degenerate single-point "cell" (no averaging/downsampling), so
         // VtkUnstructuredGridRenderer's Velocity-glyph rendering (built for
-        // real .vtk cell data) has a manageable number of cells to draw
-        // instead of one per raw CSV row. Field names match
+        // real .vtk cell data) gets a manageable, undistorted set of cells to
+        // draw instead of one per raw CSV row. Field names match
         // VtkUnstructuredGridRenderer's own TemperatureField/PressureField/
         // VelocityField defaults, so a caller doesn't need to reconfigure it.
         // Pressure has no CSV equivalent, so every cell gets a uniform
@@ -360,62 +362,42 @@ namespace Monospark
             if (points.Length == 0)
                 throw new InvalidDataException($"No points found in {sourceDescription}.");
 
-            Bounds bounds = ComputeBounds(points);
-            (int resX, int resY, int resZ) = ComputeVelocityGridDims(VelocityResolution, bounds.size);
+            // sqrMagnitude comparison avoids a sqrt per row.
+            float minSpeedSqr = MinVelocitySpeed * MinVelocitySpeed;
 
-            Vector3 min = bounds.min;
-            Vector3 size = bounds.size;
-            int bucketCountTotal = resX * resY * resZ;
-
-            var posSum = new Vector3[bucketCountTotal];
-            var tempSum = new float[bucketCountTotal];
-            var velSum = new Vector3[bucketCountTotal];
-            var hits = new int[bucketCountTotal];
+            var filteredPoints = new List<Vector3>();
+            var filteredTemps = new List<float>();
+            var filteredVels = new List<Vector3>();
 
             for (int i = 0; i < points.Length; i++)
             {
-                Vector3 p = points[i];
-                int vx = Mathf.Clamp((int)((p.x - min.x) / size.x * resX), 0, resX - 1);
-                int vy = Mathf.Clamp((int)((p.y - min.y) / size.y * resY), 0, resY - 1);
-                int vz = Mathf.Clamp((int)((p.z - min.z) / size.z * resZ), 0, resZ - 1);
-                int index = vx + vy * resX + vz * resX * resY;
-
-                posSum[index] += p;
-                tempSum[index] += temperatures[i];
-                velSum[index] += velocities[i];
-                hits[index]++;
-            }
-
-            var bucketPoints = new List<Vector3>();
-            var bucketTemps = new List<float>();
-            var bucketVels = new List<Vector3>();
-            for (int i = 0; i < bucketCountTotal; i++)
-            {
-                if (hits[i] == 0)
+                if (velocities[i].sqrMagnitude < minSpeedSqr)
                     continue;
-                bucketPoints.Add(posSum[i] / hits[i]);
-                bucketTemps.Add(tempSum[i] / hits[i]);
-                bucketVels.Add(velSum[i] / hits[i]);
+
+                filteredPoints.Add(points[i]);
+                filteredTemps.Add(temperatures[i]);
+                filteredVels.Add(velocities[i]);
             }
 
-            int cellCount = bucketPoints.Count;
+            int cellCount = filteredPoints.Count;
             var cells = new VtkCell[cellCount];
             for (int i = 0; i < cellCount; i++)
                 cells[i] = new VtkCell { Type = 1 /* VTK_VERTEX */, PointIndices = new[] { i } };
 
             return new VtkUnstructuredGridData
             {
-                Title = $"{sourceDescription} (velocity glyphs, {cellCount}/{points.Length} cells)",
-                Points = bucketPoints.ToArray(),
+                Title = $"{sourceDescription} (velocity glyphs, {cellCount}/{points.Length} cells, " +
+                        $"min speed {MinVelocitySpeed} m/s)",
+                Points = filteredPoints.ToArray(),
                 Cells = cells,
                 CellScalars = new Dictionary<string, float[]>
                 {
-                    ["Temperature(C)"] = bucketTemps.ToArray(),
+                    ["Temperature(C)"] = filteredTemps.ToArray(),
                     ["Pressure(Pa)"] = UniformArray(cellCount, 1f)
                 },
                 CellVectors = new Dictionary<string, Vector3[]>
                 {
-                    ["Velocity(m/s)"] = bucketVels.ToArray()
+                    ["Velocity(m/s)"] = filteredVels.ToArray()
                 }
             };
         }
@@ -426,23 +408,6 @@ namespace Monospark
             for (int i = 0; i < count; i++)
                 array[i] = value;
             return array;
-        }
-
-        // Scales a single VelocityResolution knob into a near-cubic per-axis
-        // bucket grid proportional to the bounds' actual aspect ratio --
-        // resolution is the bucket count along the LONGEST axis, so a long,
-        // thin room gets proportionally fewer buckets on its shorter axes
-        // instead of being distorted into a resolution^3 cube.
-        static (int x, int y, int z) ComputeVelocityGridDims(int resolution, Vector3 size)
-        {
-            int clampedResolution = Mathf.Max(1, resolution);
-            float maxExtent = Mathf.Max(Mathf.Max(size.x, size.y), size.z);
-            maxExtent = Mathf.Max(maxExtent, Mathf.Epsilon);
-
-            int resX = Mathf.Max(1, Mathf.RoundToInt(clampedResolution * size.x / maxExtent));
-            int resY = Mathf.Max(1, Mathf.RoundToInt(clampedResolution * size.y / maxExtent));
-            int resZ = Mathf.Max(1, Mathf.RoundToInt(clampedResolution * size.z / maxExtent));
-            return (resX, resY, resZ);
         }
 
         // Disk entry point: FilePath, streamed rather than loaded whole (a CSV

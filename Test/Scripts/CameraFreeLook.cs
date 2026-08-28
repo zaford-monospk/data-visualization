@@ -3,26 +3,67 @@ using UnityEngine.InputSystem;
 
 namespace Monospark
 {
-    // Unity Scene-view-style free camera: hold right mouse button to look
-    // around (yaw/pitch) and move with WASD, in full 3D relative to that look
-    // direction (not locked to the horizontal plane — this is for flying
-    // around/through a room-scale volumetric dataset, not walking on a
-    // floor). Release right-click and it's inert, so the cursor stays free
-    // for clicking TestUI's OnGUI buttons without any lock/unlock step.
+    // Unity Scene-view-style free camera: looks around (yaw/pitch) and moves
+    // with WASD, in full 3D relative to that look direction (not locked to
+    // the horizontal plane — this is for flying around/through a room-scale
+    // volumetric dataset, not walking on a floor). Which mouse input actually
+    // triggers looking is configurable (see LookTrigger) -- by default it's
+    // LeftClick, so releasing it leaves the camera inert and the cursor free
+    // for clicking TestUI's OnGUI buttons without any lock/unlock step; that
+    // stops being true under Always (see LookTrigger's own doc comment).
     public class CameraFreeLook : MonoBehaviour
     {
+        // Which mouse input has to be active for the camera to look around
+        // (and, since WASD move is gated by the same condition, to move too).
+        public enum LookTriggerMode
+        {
+            Always,     // no button needed -- looks around continuously.
+                        // NOTE: this also captures the cursor for TestUI's
+                        // OnGUI buttons, unlike the two click-gated modes.
+            LeftClick,  // hold left mouse button (the original/default behavior).
+            RightClick  // hold right mouse button.
+        }
+
         public float MoveSpeed = 5f;
         public float LookSensitivity = 0.1f;
         public float MaxPitch = 89f;
 
         float _yaw;
         float _pitch;
-        
+
         public bool MoveHorizontally = false;
+        public bool WASDMoveEnabled = true;
+        public LookTriggerMode LookTrigger = LookTriggerMode.LeftClick;
         public float PhysicsRadius = 0.3f;
         public LayerMask WallLayer;
-        
-        
+
+        // Sets which mouse input triggers looking around -- e.g. wire to a
+        // dropdown/set of UI Buttons (each passing its own LookTriggerMode)
+        // so a tester can switch between Always/LeftClick/RightClick without
+        // touching the Inspector.
+        public void SetLookTrigger(LookTriggerMode trigger)
+        {
+            LookTrigger = trigger;
+        }
+
+        // Flips MoveHorizontally -- switches between full-3D fly (move
+        // relative to look direction, including up/down) and floor-locked
+        // horizontal movement. Parameterless so it can be wired straight to
+        // a UI Button's OnClick (e.g. from TestUI) or a hotkey binding.
+        public void ToggleHorizontalMove()
+        {
+            MoveHorizontally = !MoveHorizontally;
+        }
+
+        // Flips whether WASD moves the camera at all -- mouse-look still
+        // works either way (this only gates UpdateMove, not the whole
+        // component), so a tester can freeze camera movement without losing
+        // the ability to look around.
+        public void ToggleWASDMove()
+        {
+            WASDMoveEnabled = !WASDMoveEnabled;
+        }
+
         void Start()
         {
             Vector3 euler = transform.eulerAngles;
@@ -33,12 +74,20 @@ namespace Monospark
         void Update()
         {
             Mouse mouse = Mouse.current;
-            if (mouse == null || !mouse.leftButton.isPressed)
+            if (mouse == null || !IsLookTriggered(mouse))
                 return;
 
             UpdateLook(mouse);
-            UpdateMove(Keyboard.current);
+            if (WASDMoveEnabled)
+                UpdateMove(Keyboard.current);
         }
+
+        bool IsLookTriggered(Mouse mouse) => LookTrigger switch
+        {
+            LookTriggerMode.Always => true,
+            LookTriggerMode.RightClick => mouse.rightButton.isPressed,
+            _ => mouse.leftButton.isPressed // LeftClick, and the safe default for an unhandled enum value
+        };
 
         void UpdateLook(Mouse mouse)
         {

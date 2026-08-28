@@ -79,12 +79,12 @@ namespace Monospark
         // Test_Room_16000.csv). dataPath's CSV must have Velocity[i]/[j]/[k]
         // columns -- not every export has them (boundary-condition exports
         // typically don't); BuildData reports that clearly if they're
-        // missing. velocityResolution controls how many buckets the
-        // (potentially 10,000+ row) CSV gets downsampled into -- see
-        // VtkFrameReader.VelocityResolution -- lower for fewer/sparser glyphs.
+        // missing. minVelocitySpeed filters out rows slower than that (m/s)
+        // instead of spatially downsampling -- see VtkFrameReader.MinVelocitySpeed
+        // -- raise it to cut down a CSV that's mostly near-stagnant rows.
         public VtkUnstructuredGridRenderer CreateVelocityGridFromCsv(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y, int velocityResolution = 16, DataPathMode pathMode = DataPathMode.Disk)
+            WorldUpAxis worldUp = WorldUpAxis.Y, float minVelocitySpeed = 0f, DataPathMode pathMode = DataPathMode.Disk)
         {
             GameObject instance = InstantiatePrefab(_instancedModelRenderer, worldPosition, rotation);
             var gridRenderer = instance.GetComponent<VtkUnstructuredGridRenderer>();
@@ -105,7 +105,7 @@ namespace Monospark
                 }
             }
 
-            var reader = new VtkFrameReader { WorldUp = worldUp, IncludeVelocity = true, VelocityResolution = velocityResolution };
+            var reader = new VtkFrameReader { WorldUp = worldUp, IncludeVelocity = true, MinVelocitySpeed = minVelocitySpeed };
             instance.AddComponent<DataConvertManager>().GetMap(OnBufferReady, dataPath, reader, pathMode);
             return gridRenderer;
         }

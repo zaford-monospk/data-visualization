@@ -46,6 +46,17 @@ namespace Monospark
         // lands in a reasonable ballpark.
         public float FallbackScale = 0.1f;
 
+        // Floor applied to each axis of TargetCube.localScale in Set() -- a
+        // source that's inherently planar (e.g. a CFD "X1"/"X2" plane-cut CSV
+        // export, where every row shares the same X) reports a worldSize of
+        // ~0 along that axis. A truly (near-)zero-scale Transform makes
+        // TargetCube.worldToLocalMatrix singular, which breaks TargetPlane's
+        // _VolumeWorldToLocal reprojection (NaN/Inf math -> nothing renders
+        // on the slice plane) even though the raymarched cube itself still
+        // looks fine (just an imperceptibly thin box) -- so this needs
+        // clamping regardless of whether TargetPlane is even in use.
+        public float MinAxisSize = 0.05f;
+
         Texture3D _texture;
 
         void Awake()
@@ -158,8 +169,17 @@ namespace Monospark
                 SliceMaterial.SetTexture(VolumeId, _texture);
             if (TargetCube != null && _texture != null)
             {
-                TargetCube.localScale = worldSize ??
+                Vector3 size = worldSize ??
                     new Vector3(_texture.width, _texture.height, _texture.depth) * FallbackScale;
+
+                // See MinAxisSize's doc comment -- a plane-cut source reports
+                // ~0 on one axis, which would otherwise make this Transform's
+                // scale (and therefore worldToLocalMatrix) singular.
+                size.x = Mathf.Max(size.x, MinAxisSize);
+                size.y = Mathf.Max(size.y, MinAxisSize);
+                size.z = Mathf.Max(size.z, MinAxisSize);
+
+                TargetCube.localScale = size;
             }
         }
 

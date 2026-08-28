@@ -6,9 +6,9 @@ using UnityEditor;
 
 namespace Monospark
 {
-    // Runtime OnGUI test panel: spawns renderers/players through CFDFactory,
-    // then drives them purely through IRenderStateControl (visibility +
-    // material floats) rather than their concrete types, exercising the same
+    // Runtime OnGUI test panel: spawns a VtkFrameRenderer through CFDFactory,
+    // then drives it purely through IRenderStateControl (visibility +
+    // material floats) rather than its concrete type, exercising the same
     // decoupled control surface a real UI would use.
     public class TestUI : MonoBehaviour
     {
@@ -22,82 +22,30 @@ namespace Monospark
         static readonly string[] PathModeLabels = { "Assets", "StreamingAssets", "Disk" };
         static readonly string[] WorldUpLabels = { "Y up", "Z up" };
 
-        [Header("Grid Renderer (instanced)")]
-        public Vector3 GridRendererPosition;
-        public Vector3 GridRendererEulerRotation;
-
-        [Header("Velocity Grid (CSV, instanced)")]
-        public Vector3 VelocityGridPosition;
-        public Vector3 VelocityGridEulerRotation;
-
-        [Header("Volume Player (raymarch)")]
-        public Vector3 VolumePlayerPosition;
-        public Vector3 VolumePlayerEulerRotation;
-        public Shader VolumeShaderOriginal;
-        public Shader VolumeShaderInterpolate;
-
         [Header("Volume Static (raymarch, single frame)")]
         public Vector3 VolumeStaticPosition;
         public Vector3 VolumeStaticEulerRotation;
 
-        // Not Inspector-exposed: these are edited live via the GUI's own text
-        // field, so a stale/wrong Inspector value could never end up silently
-        // in use — the field always reflects exactly what's on screen.
-        string _gridRendererDataPath = "";
-        string _velocityGridDataPath = "";
-        string _volumePlayerDataPath = "";
+        // Not Inspector-exposed: edited live via the GUI's own text field, so
+        // a stale/wrong Inspector value could never end up silently in use —
+        // the field always reflects exactly what's on screen.
         string _volumeStaticDataPath = "";
-        PathMode _gridPathMode;
-        PathMode _velocityGridPathMode;
-        PathMode _volumePathMode;
         PathMode _volumeStaticPathMode;
 
-        // Only for sections whose reader parses raw point coordinates
-        // (Grid Renderer's .vtk, Velocity Grid's/Volume Static's .csv) -- the
-        // Volume Player reads pre-baked voxel frames with no per-point axis
-        // to convert.
-        WorldUpAxis _gridWorldUp;
-        WorldUpAxis _velocityGridWorldUp;
+        // .vtk POINTS / .csv X-Y-Z may be authored Z-up (common for CAD/CFD
+        // tooling) even though Unity is Y-up -- see VtkFrameReader.WorldUp.
         WorldUpAxis _volumeStaticWorldUp;
 
-        // Bucket count along the CSV's longest bounds axis -- see
-        // VtkFrameReader.VelocityResolution. Float (not int) since
-        // GUILayout.HorizontalSlider only comes in that flavor.
-        float _velocityGridResolution = 16f;
-
-        IRenderStateControl _gridRenderer;
-        IRenderStateControl _velocityGrid;
-        IRenderStateControl _volumePlayer;
         IRenderStateControl _volumeStatic;
-        bool _gridRendererVisible = true;
-        bool _velocityGridVisible = true;
-        bool _volumePlayerVisible = true;
         bool _volumeStaticVisible = true;
-        bool _gridRendererLoading;
-        bool _velocityGridLoading;
-        bool _volumePlayerLoading;
         bool _volumeStaticLoading;
-        string _gridPathError;
-        string _velocityGridPathError;
-        string _volumePathError;
         string _volumeStaticPathError;
-        float _gridClipMin;
-        float _gridClipMax = 1f;
-        float _gridVelocityClipMin;
-        float _gridVelocityClipMax = 1f;
-        float _velocityGridClipMin;
-        float _velocityGridClipMax = 1f;
-        float _velocityGridVelocityClipMin;
-        float _velocityGridVelocityClipMax = 1f;
-        float _volumeClipMin;
-        float _volumeClipMax = 1f;
-        bool _volumeInterpolate;
         float _volumeStaticClipMin;
         float _volumeStaticClipMax = 1f;
         bool _collapsed;
 
         const float PanelWidth = 380f;
-        const float PanelHeight = 1570f;
+        const float PanelHeight = 420f;
         const float HeaderHeight = 30f;
 
         static GUIStyle _errorStyle;
@@ -117,222 +65,17 @@ namespace Monospark
             if (!_collapsed)
             {
                 GUILayout.Space(6);
-                DrawGridRendererSection();
-                GUILayout.Space(12);
-                DrawVelocityGridSection();
-                GUILayout.Space(12);
-                DrawVolumePlayerSection();
-                GUILayout.Space(12);
                 DrawVolumeStaticSection();
             }
 
             GUILayout.EndArea();
         }
 
-        void DrawGridRendererSection()
-        {
-            GUILayout.Label("Grid Renderer (instanced)" + (_gridRendererLoading ? " (loading...)" : ""));
-
-            _gridRendererDataPath = GUILayout.TextField(_gridRendererDataPath);
-            _gridPathMode = (PathMode)GUILayout.SelectionGrid((int)_gridPathMode, PathModeLabels, PathModeLabels.Length);
-
-            if (_gridPathMode == PathMode.Disk)
-                DrawBrowseButton(isFolder: false, "Select VTK File", "vtk", path => _gridRendererDataPath = path);
-
-            // room.vtk's raw X/Y/Z may be authored Z-up (common for CAD/CFD
-            // tooling) even though Unity is Y-up -- picked once, before
-            // Create, since it has to reach VtkUnstructuredGridReader before
-            // it parses POINTS/VECTORS, not after.
-            _gridWorldUp = (WorldUpAxis)GUILayout.SelectionGrid((int)_gridWorldUp, WorldUpLabels, WorldUpLabels.Length);
-
-            GUI.enabled = !_gridRendererLoading;
-            if (GUILayout.Button("Create"))
-            {
-                if (CFDFactory.Instance == null)
-                {
-                    Debug.LogError("[TestUI] No CFDFactory in scene.");
-                }
-                else if (!TryResolvePath(_gridRendererDataPath, _gridPathMode, isDirectory: false,
-                             out string resolvedPath, out _gridPathError))
-                {
-                    Debug.LogWarning($"[TestUI] {_gridPathError}");
-                }
-                else
-                {
-                    DestroyIfExists(_gridRenderer);
-                    _gridRendererLoading = true;
-                    _gridRenderer = CFDFactory.Instance.CreateGridRenderer(
-                        resolvedPath, GridRendererPosition, Quaternion.Euler(GridRendererEulerRotation),
-                        _ => _gridRendererLoading = false, _gridWorldUp);
-                    _gridRendererVisible = true;
-                    // Read the prefab-configured material's actual current values
-                    // rather than assuming the slider defaults (0/1) match them.
-                    _gridClipMin = _gridRenderer.GetMaterialFloat("_ClipMin");
-                    _gridClipMax = _gridRenderer.GetMaterialFloat("_ClipMax");
-                    _gridVelocityClipMin = _gridRenderer.GetMaterialFloat("_VelocityClipMin");
-                    _gridVelocityClipMax = _gridRenderer.GetMaterialFloat("_VelocityClipMax");
-                }
-            }
-            GUI.enabled = true;
-
-            if (!string.IsNullOrEmpty(_gridPathError))
-                GUILayout.Label(_gridPathError, ErrorStyle());
-
-            DrawVisibilityToggle(_gridRenderer, ref _gridRendererVisible, _gridRendererLoading);
-            GUILayout.Label("Temperature");
-            DrawClipRangeControls(_gridRenderer, "_ClipMin", "_ClipMax", ref _gridClipMin, ref _gridClipMax, 100f, "°C");
-            GUILayout.Label("Velocity"); // grid renderer only — VolumeRenderer.shader has no per-sample velocity
-            DrawClipRangeControls(_gridRenderer, "_VelocityClipMin", "_VelocityClipMax", ref _gridVelocityClipMin, ref _gridVelocityClipMax);
-        }
-
-        // Same VtkUnstructuredGridRenderer/InstancedPointRender.shader as Grid
-        // Renderer above, but sourced from a CSV point cloud
-        // (CFDFactory.CreateVelocityGridFromCsv) instead of a .vtk file's
-        // real cell connectivity -- for CFD exports that only ship as CSV
-        // (e.g. Test_Room_16000.csv). Not every CSV has Velocity[i]/[j]/[k]
-        // columns (boundary-condition exports typically don't); Create just
-        // surfaces that as an error like any other failed load. Resolution
-        // controls how many buckets the (potentially 10,000+ row) CSV gets
-        // downsampled into before each bucket becomes one glyph (see
-        // VtkFrameReader.VelocityResolution) -- lower for fewer/sparser glyphs.
-        void DrawVelocityGridSection()
-        {
-            GUILayout.Label("Velocity Grid (CSV, instanced)" + (_velocityGridLoading ? " (loading...)" : ""));
-
-            _velocityGridDataPath = GUILayout.TextField(_velocityGridDataPath);
-            _velocityGridPathMode = (PathMode)GUILayout.SelectionGrid((int)_velocityGridPathMode, PathModeLabels, PathModeLabels.Length);
-
-            if (_velocityGridPathMode == PathMode.Disk)
-                DrawBrowseButton(isFolder: false, "Select CSV File", "csv", path => _velocityGridDataPath = path);
-
-            // Same Z-up-vs-Y-up concern as the other sections -- applies to
-            // the CSV's X/Y/Z and Velocity[i]/[j]/[k] columns alike (see
-            // VtkFrameReader.WorldUp).
-            _velocityGridWorldUp = (WorldUpAxis)GUILayout.SelectionGrid((int)_velocityGridWorldUp, WorldUpLabels, WorldUpLabels.Length);
-
-            GUILayout.Label($"Resolution: {(int)_velocityGridResolution}");
-            _velocityGridResolution = GUILayout.HorizontalSlider(_velocityGridResolution, 1f, 64f);
-
-            GUI.enabled = !_velocityGridLoading;
-            if (GUILayout.Button("Create"))
-            {
-                if (CFDFactory.Instance == null)
-                {
-                    Debug.LogError("[TestUI] No CFDFactory in scene.");
-                }
-                else if (!TryResolvePath(_velocityGridDataPath, _velocityGridPathMode, isDirectory: false,
-                             out string resolvedPath, out _velocityGridPathError))
-                {
-                    Debug.LogWarning($"[TestUI] {_velocityGridPathError}");
-                }
-                else
-                {
-                    DestroyIfExists(_velocityGrid);
-                    _velocityGridLoading = true;
-                    _velocityGrid = CFDFactory.Instance.CreateVelocityGridFromCsv(
-                        resolvedPath, VelocityGridPosition, Quaternion.Euler(VelocityGridEulerRotation),
-                        _ => _velocityGridLoading = false, _velocityGridWorldUp, (int)_velocityGridResolution);
-                    _velocityGridVisible = true;
-                    // Read the prefab-configured material's actual current values
-                    // rather than assuming the slider defaults (0/1) match them.
-                    _velocityGridClipMin = _velocityGrid.GetMaterialFloat("_ClipMin");
-                    _velocityGridClipMax = _velocityGrid.GetMaterialFloat("_ClipMax");
-                    _velocityGridVelocityClipMin = _velocityGrid.GetMaterialFloat("_VelocityClipMin");
-                    _velocityGridVelocityClipMax = _velocityGrid.GetMaterialFloat("_VelocityClipMax");
-                }
-            }
-            GUI.enabled = true;
-
-            if (!string.IsNullOrEmpty(_velocityGridPathError))
-                GUILayout.Label(_velocityGridPathError, ErrorStyle());
-
-            DrawVisibilityToggle(_velocityGrid, ref _velocityGridVisible, _velocityGridLoading);
-            GUILayout.Label("Temperature");
-            DrawClipRangeControls(_velocityGrid, "_ClipMin", "_ClipMax", ref _velocityGridClipMin, ref _velocityGridClipMax, 100f, "°C");
-            GUILayout.Label("Velocity");
-            DrawClipRangeControls(_velocityGrid, "_VelocityClipMin", "_VelocityClipMax", ref _velocityGridVelocityClipMin, ref _velocityGridVelocityClipMax);
-        }
-
-        void DrawVolumePlayerSection()
-        {
-            GUILayout.Label("Volume Player (raymarch)" + (_volumePlayerLoading ? " (loading...)" : ""));
-
-            _volumePlayerDataPath = GUILayout.TextField(_volumePlayerDataPath);
-
-            PathMode newVolumePathMode = (PathMode)GUILayout.SelectionGrid((int)_volumePathMode, PathModeLabels, PathModeLabels.Length);
-            if (newVolumePathMode != _volumePathMode)
-            {
-                _volumePathMode = newVolumePathMode;
-                if (_volumePathMode == PathMode.StreamingAssets)
-                    _volumePlayerDataPath = "/CFDDatas/Timestep/0";
-            }
-
-            if (_volumePathMode == PathMode.Disk)
-                DrawBrowseButton(isFolder: true, "Select Frame Sequence Folder", null, path => _volumePlayerDataPath = path);
-
-            GUI.enabled = !_volumePlayerLoading;
-            if (GUILayout.Button("Create"))
-            {
-                if (CFDFactory.Instance == null)
-                {
-                    Debug.LogError("[TestUI] No CFDFactory in scene.");
-                }
-                // VtkFrameSequenceReader.FilePath is a directory (frames.raw +
-                // frames_meta.json live inside it), unlike the grid renderer's
-                // single-file path — hence isDirectory: true here.
-                else if (!TryResolvePath(_volumePlayerDataPath, _volumePathMode, isDirectory: true,
-                             out string resolvedPath, out _volumePathError))
-                {
-                    Debug.LogWarning($"[TestUI] {_volumePathError}");
-                }
-                else
-                {
-                    DestroyIfExists(_volumePlayer);
-                    _volumePlayerLoading = true;
-                    _volumePlayer = CFDFactory.Instance.CreateVolumePlayer(
-                        resolvedPath, VolumePlayerPosition, Quaternion.Euler(VolumePlayerEulerRotation),
-                        _ => _volumePlayerLoading = false);
-                    _volumePlayerVisible = true;
-                    // Read the prefab-configured material's actual current values
-                    // rather than assuming the slider defaults (0/1) match them.
-                    _volumeClipMin = _volumePlayer.GetMaterialFloat("_ClipMin");
-                    _volumeClipMax = _volumePlayer.GetMaterialFloat("_ClipMax");
-                    _volumeInterpolate = false; // a freshly created player always starts non-interpolating
-                }
-            }
-            GUI.enabled = true;
-
-            if (!string.IsNullOrEmpty(_volumePathError))
-                GUILayout.Label(_volumePathError, ErrorStyle());
-
-            DrawVisibilityToggle(_volumePlayer, ref _volumePlayerVisible, _volumePlayerLoading);
-
-            GUI.enabled = _volumePlayer != null;
-            if (GUILayout.Button(_volumeInterpolate ? "Interpolate: On" : "Interpolate: Off"))
-            {
-                _volumeInterpolate = !_volumeInterpolate;
-
-                // Only VolumeRenderer_Interpolate.shader reads _VolumeNext/_FrameBlend
-                // at all, so the toggle drives both the shader and the feature together.
-                Shader shader = _volumeInterpolate ? VolumeShaderInterpolate : VolumeShaderOriginal;
-                if (shader == null)
-                    Debug.LogWarning($"[TestUI] Volume Shader {(_volumeInterpolate ? "Interpolate" : "Original")} isn't assigned in the Inspector — shader not changed.");
-
-                _volumePlayer?.SetShader(shader);
-                _volumePlayer?.SetInterpolation(_volumeInterpolate);
-            }
-            GUI.enabled = true;
-
-            DrawClipRangeControls(_volumePlayer, "_ClipMin", "_ClipMax", ref _volumeClipMin, ref _volumeClipMax, 100f, "°C");
-        }
-
-        // Same shader (VolumeRenderer.shader) as the Volume Player above, but
-        // through VtkFrameReader/VtkFrameRenderer instead of
-        // VtkFrameSequenceReader/VtkFrameSequencePlayer — reads a single static
-        // snapshot FILE (.vtk or .csv, same single-file shape as the Grid
-        // Renderer's path, not a folder) and just displays it, no
-        // Update()-driven playback, hence no Interpolate button either
-        // (there's only ever one texture, nothing to blend toward).
+        // Through VtkFrameReader/VtkFrameRenderer -- reads a single static
+        // snapshot FILE (.vtk or .csv, not a folder) and displays it as a
+        // raymarched volume (VolumeRenderer.shader), no Update()-driven
+        // playback, hence no Interpolate button (there's only ever one
+        // texture, nothing to blend toward).
         void DrawVolumeStaticSection()
         {
             GUILayout.Label("Volume Static (raymarch, single frame)" + (_volumeStaticLoading ? " (loading...)" : ""));
@@ -350,8 +93,8 @@ namespace Monospark
             if (_volumeStaticPathMode == PathMode.Disk)
                 DrawBrowseButton(isFolder: false, "Select VTK/CSV File", null, path => _volumeStaticDataPath = path);
 
-            // Same Z-up-vs-Y-up concern as the Grid Renderer above -- applies
-            // to .vtk POINTS and .csv X/Y/Z alike (see VtkFrameReader.WorldUp).
+            // Same Z-up-vs-Y-up concern noted above -- applies to .vtk POINTS
+            // and .csv X/Y/Z alike (see VtkFrameReader.WorldUp).
             _volumeStaticWorldUp = (WorldUpAxis)GUILayout.SelectionGrid((int)_volumeStaticWorldUp, WorldUpLabels, WorldUpLabels.Length);
 
             GUI.enabled = !_volumeStaticLoading;
@@ -361,9 +104,8 @@ namespace Monospark
                 {
                     Debug.LogError("[TestUI] No CFDFactory in scene.");
                 }
-                // VtkFrameReader.FilePath is a single .vtk or .csv file,
-                // unlike the volume player's frame-sequence directory —
-                // hence isDirectory: false here.
+                // VtkFrameReader.FilePath is a single .vtk or .csv file, not
+                // a directory -- hence isDirectory: false here.
                 else if (!TryResolvePath(_volumeStaticDataPath, _volumeStaticPathMode, isDirectory: false,
                              out string resolvedPath, out _volumeStaticPathError))
                 {
