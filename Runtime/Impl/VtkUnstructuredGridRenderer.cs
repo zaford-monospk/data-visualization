@@ -13,6 +13,10 @@ namespace Monospark
     // synthesized in the vertex shader from _CellBuffer via SV_VertexID) or
     // RenderMeshIndirect for an instanced mesh glyph per cell (SV_InstanceID
     // indexes _CellBuffer to offset/scale/rotate InstanceMesh per copy).
+    // Material is instanced per-component in Awake (see _materialInstance),
+    // not used directly -- otherwise every renderer sharing the same
+    // prefab's Material asset would stomp on each other's buffer binding,
+    // clip range, and shader.
     public class VtkUnstructuredGridRenderer : StructuredBufferRenderer , IRenderStateControl
     {
         public enum eRenderType
@@ -57,6 +61,33 @@ namespace Monospark
         // the same way Temperature/Pressure are normalized here on the CPU.
         float _speedMin;
         float _speedMax;
+
+        // Tracked separately from the public Material field so OnDestroy only
+        // ever destroys the instance THIS component created -- not whatever a
+        // caller might reassign the field to later.
+        Material _materialInstance;
+
+        void Awake()
+        {
+            // Per-instance copy, not the shared prefab/scene Material asset
+            // directly -- see the class doc comment.
+            if (Material != null)
+            {
+                _materialInstance = new Material(Material);
+                Material = _materialInstance;
+            }
+        }
+
+        void OnDestroy()
+        {
+            ReleaseBuffers();
+            // Instances created via `new Material(...)` in Awake aren't
+            // scene/project assets -- Unity won't reclaim them on its own
+            // when this GameObject is destroyed, so this would otherwise
+            // leak one Material per instance for the rest of the session.
+            if (_materialInstance != null)
+                Destroy(_materialInstance);
+        }
 
         // There's no Renderer component to toggle here — Update() issues the
         // indirect draw call directly — so visibility just gates that call.
@@ -169,11 +200,12 @@ namespace Monospark
 
             // The expensive part — recomputing the matrix/world bounds from
             // the Transform — only happens when it's actually moved. The
-            // Material calls below still run every frame regardless: Material
-            // is a shared asset (this prefab's Material reference isn't
-            // auto-instanced), so another renderer's Update() could have
-            // overwritten these properties since our last frame — cheap to
-            // just re-apply the cached values right before our own draw call.
+            // Material calls below still run every frame regardless: this
+            // uses Graphics.Render*Indirect (immediate-mode draw calls, no
+            // persistent Renderer component backing them), so the buffer/
+            // matrix/speed-range bindings have to be pushed onto Material
+            // fresh before every draw call this component issues, not just
+            // once after Set().
             if (transform.hasChanged)
             {
                 _objectToWorld = transform.localToWorldMatrix;
@@ -291,11 +323,6 @@ namespace Monospark
             _cellBuffer = null;
             _commandBuffer?.Release();
             _commandBuffer = null;
-        }
-
-        void OnDestroy()
-        {
-            ReleaseBuffers();
         }
     }
 }

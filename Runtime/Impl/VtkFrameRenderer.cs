@@ -11,7 +11,11 @@ namespace Monospark
     // positioned/rotated anywhere by the caller, kept in sync every frame via
     // SliceMaterial's _VolumeWorldToLocal (see LateUpdate). TargetCube/Material
     // and TargetPlane/SliceMaterial are both optional and independent: either,
-    // both, or neither can be visible at once.
+    // both, or neither can be visible at once. Material/SliceMaterial are
+    // instanced per-component in Awake (see _materialInstance/_sliceMaterialInstance)
+    // rather than used directly -- otherwise every renderer sharing the same
+    // prefab's Material asset would stomp on each other's texture/clip
+    // range/shader.
     public class VtkFrameRenderer : MonoBehaviour, IRenderStateControl
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
@@ -59,8 +63,32 @@ namespace Monospark
 
         Texture3D _texture;
 
+        // Tracked separately from the public Material/SliceMaterial fields so
+        // OnDestroy only ever destroys the instance THIS component created --
+        // not whatever a caller might reassign those fields to later.
+        Material _materialInstance;
+        Material _sliceMaterialInstance;
+
         void Awake()
         {
+            // Per-instance copies, not the shared prefab/scene Material asset
+            // directly: Material.SetTexture/SetFloat/shader= below all mutate
+            // whatever Material this field points at, so two GameObjects
+            // referencing the same Material asset (e.g. two instances of the
+            // same prefab) would otherwise stomp on each other's texture,
+            // clip range, and shader every time either one calls Set()/
+            // SetMaterialFloat()/SetShader().
+            if (Material != null)
+            {
+                _materialInstance = new Material(Material);
+                Material = _materialInstance;
+            }
+            if (SliceMaterial != null)
+            {
+                _sliceMaterialInstance = new Material(SliceMaterial);
+                SliceMaterial = _sliceMaterialInstance;
+            }
+
 #if UNITY_WEBGL
             if (Material == null)
                 return;
@@ -187,6 +215,14 @@ namespace Monospark
         {
             if (_texture != null)
                 Destroy(_texture);
+            // Instances created via `new Material(...)` in Awake aren't
+            // scene/project assets -- Unity won't reclaim them on its own
+            // when this GameObject is destroyed, so this would otherwise
+            // leak one Material per instance for the rest of the session.
+            if (_materialInstance != null)
+                Destroy(_materialInstance);
+            if (_sliceMaterialInstance != null)
+                Destroy(_sliceMaterialInstance);
         }
     }
 }

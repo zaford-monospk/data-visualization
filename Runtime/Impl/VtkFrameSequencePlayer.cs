@@ -12,6 +12,9 @@ namespace Monospark
     // playback via VolumeRenderer_Interpolate.shader specifically — off by
     // default (cheap: one texture, rebuilt only ~Fps times/sec), since the
     // extra texture only helps when the assigned shader actually reads it.
+    // Material is instanced per-component in Awake (see _materialInstance),
+    // not used directly -- otherwise every player sharing the same prefab's
+    // Material asset would stomp on each other's texture/clip range/shader.
     public class VtkFrameSequencePlayer : MonoBehaviour , IRenderStateControl
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
@@ -30,6 +33,22 @@ namespace Monospark
         float _elapsed;
         int _currentFrame = -1;
         bool _interpolate;
+
+        // Tracked separately from the public Material field so OnDestroy only
+        // ever destroys the instance THIS component created -- not whatever a
+        // caller might reassign the field to later.
+        Material _materialInstance;
+
+        void Awake()
+        {
+            // Per-instance copy, not the shared prefab/scene Material asset
+            // directly -- see the class doc comment.
+            if (Material != null)
+            {
+                _materialInstance = new Material(Material);
+                Material = _materialInstance;
+            }
+        }
 
         // TargetCube is what's actually drawn (a normal MeshRenderer), so
         // visibility toggles its Renderer directly — playback keeps running
@@ -211,6 +230,12 @@ namespace Monospark
                 Destroy(_textureCurrent);
             if (_textureNext != null)
                 Destroy(_textureNext);
+            // Instances created via `new Material(...)` in Awake aren't
+            // scene/project assets -- Unity won't reclaim them on its own
+            // when this GameObject is destroyed, so this would otherwise
+            // leak one Material per instance for the rest of the session.
+            if (_materialInstance != null)
+                Destroy(_materialInstance);
         }
     }
 }
