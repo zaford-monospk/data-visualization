@@ -15,10 +15,19 @@ namespace Monospark
     // instanced per-component in Awake (see _materialInstance/_sliceMaterialInstance)
     // rather than used directly -- otherwise every renderer sharing the same
     // prefab's Material asset would stomp on each other's texture/clip
-    // range/shader.
+    // range/shader. TargetPlane/SliceMaterial can alternatively show a
+    // direct 2D slice (SetSlice2D) instead of a Texture3D cross-section, for
+    // a source that's already inherently 2D -- see SetSlice2D's doc comment.
+    // SetSlice2D also drives TargetCube's visibility automatically (hidden
+    // while a 2D slice is showing, shown again once it's cleared), since the
+    // two are meant to be mutually exclusive views of the data, not both
+    // AND the 2D slice at once, the way TargetPlane's own 3D-reprojection
+    // mode is free to coexist with the cube.
     public class VtkFrameRenderer : MonoBehaviour, IRenderStateControl
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
+        static readonly int VolumeSlice2DId = Shader.PropertyToID("_VolumeSlice2D");
+        static readonly int Use2DSliceId = Shader.PropertyToID("_Use2DSlice");
         static readonly int VolumeWorldToLocalId = Shader.PropertyToID("_VolumeWorldToLocal");
         static readonly int LutStartTemperatureId = Shader.PropertyToID("_LutStartTemperature");
         static readonly int LutEndTemperatureId = Shader.PropertyToID("_LutEndTemperature");
@@ -64,6 +73,7 @@ namespace Monospark
         public float MinAxisSize = 0.05f;
 
         Texture3D _texture;
+        Texture2D _texture2D;
 
         // Raw (Celsius) value range the currently-displayed Texture3D was
         // normalized against -- set by Set() (from VtkFrameReader.ValueMin/
@@ -242,6 +252,37 @@ namespace Monospark
             }
         }
 
+        // Displays a 2D slice texture directly on TargetPlane via
+        // VolumeSlicePlane.shader's _Use2DSlice mode -- for a CSV source
+        // that's ALREADY a single 2D slice (e.g. a CFD "X1"/"X2" plane-cut
+        // export -- see VtkFrameReader.BuildData(OnProcessTex2DData)),
+        // skipping the whole 3D-volume-reprojection path Set() drives.
+        // Independent of Set()/TargetCube: a renderer can show a raymarched
+        // cube (via Set), a direct 2D slice (via this), or neither, but not
+        // both on the SAME SliceMaterial at once -- they're mutually
+        // exclusive sampling modes on that one shader (_Use2DSlice), so the
+        // most recent call between this and Set() wins for TargetPlane.
+        // Pass a non-null texture to enter 2D slice mode -- TargetCube is
+        // hidden automatically (SetVisibility(false)) since it'd otherwise
+        // still show whatever Texture3D Set() last gave it, alongside the
+        // slice. Pass null to switch SliceMaterial back to the 3D-volume
+        // mode, which shows TargetCube again (SetVisibility(true)).
+        public void SetSlice2D(Texture2D texture)
+        {
+            if (_texture2D != null && _texture2D != texture)
+                Destroy(_texture2D);
+
+            _texture2D = texture;
+
+            if (SliceMaterial != null)
+            {
+                SliceMaterial.SetTexture(VolumeSlice2DId, _texture2D);
+                SliceMaterial.SetFloat(Use2DSliceId, _texture2D != null ? 1f : 0f);
+            }
+
+            SetVisibility(_texture2D == null);
+        }
+
         // Sets the shader's _LutStartTemperature/_LutEndTemperature (on both
         // Material and SliceMaterial, so the raymarched cube and the slice
         // plane stay in sync) from real Celsius values instead of the
@@ -271,6 +312,8 @@ namespace Monospark
         {
             if (_texture != null)
                 Destroy(_texture);
+            if (_texture2D != null)
+                Destroy(_texture2D);
             // Instances created via `new Material(...)` in Awake aren't
             // scene/project assets -- Unity won't reclaim them on its own
             // when this GameObject is destroyed, so this would otherwise

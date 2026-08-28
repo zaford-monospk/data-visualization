@@ -39,7 +39,12 @@ namespace Monospark
     // unlike Texture3D voxelization) -- so the existing
     // VtkUnstructuredGridRenderer glyph pipeline (built for real .vtk cell
     // data) can display Velocity from a CSV point cloud too, with no changes
-    // to that renderer.
+    // to that renderer. BuildData(OnProcessTex2DData) is CSV-only and
+    // requires the source to be a genuine single 2D slice (exactly one axis
+    // with no real spatial extent, e.g. a CFD "X1"/"X2" plane-cut export):
+    // it voxelizes directly into a Texture2D over the two real axes, for
+    // VolumeSlicePlane.shader's _Use2DSlice mode to sample via the plane
+    // mesh's own UV instead of reprojecting through a 3D volume matrix.
     public class VtkFrameReader : DataConverter
     {
         const int MinResolution = 8;
@@ -306,6 +311,77 @@ namespace Monospark
             throw new NotSupportedException(
                 $"{nameof(VtkFrameReader)} does not produce a {nameof(VtkFrameSequenceData)}; " +
                 "use VtkFrameSequenceReader instead.");
+        }
+
+        // Builds a 2D texture from CSV data that's ALREADY effectively a
+        // single slice -- exactly one axis with no real spatial extent (see
+        // ComputeResolution/DegenerateAxisSize), e.g. a CFD "X1"/"X2"
+        // plane-cut export (X collapses) or a "Z" export (Z collapses).
+        // BuildData(OnProcessTex3DData) still handles this same data fine,
+        // but bakes it into a (MinAxisSize-padded, 1-voxel-thick) Texture3D
+        // slab that VolumeSlicePlane.shader then has to reproject an
+        // arbitrary cutting plane through via a world-to-local matrix, just
+        // to read a slice that was already 2D to begin with. This skips that
+        // indirection: the two REAL axes voxelize directly into a Texture2D,
+        // which VolumeSlicePlane.shader (its _Use2DSlice mode) samples via
+        // the plane mesh's own UV -- no reprojection, no risk of the plane
+        // drifting outside the padded box's thin extent. CSV-only; throws if
+        // the source isn't genuinely planar (not exactly one degenerate axis).
+        public override void BuildData(OnProcessTex2DData callback)
+        {
+            CoroutineRunner.Run(BuildTex2DRoutine(callback));
+        }
+
+        IEnumerator BuildTex2DRoutine(OnProcessTex2DData callback)
+        {
+            callback?.Invoke(new Progress { Status = eStatus.ONPROGRESS, ProgressValue = 0f }, null);
+
+            Texture2D texture = null;
+            Exception error = null;
+
+            bool isAddressable = !string.IsNullOrEmpty(AddressableKey);
+            bool isCsv = isAddressable ||
+                (File.Exists(FilePath) && Path.GetExtension(FilePath).Equals(".csv", StringComparison.OrdinalIgnoreCase));
+
+            if (!isCsv)
+            {
+                error = new NotSupportedException(
+                    $"{nameof(VtkFrameReader)} only builds a 2D slice texture from a .csv source.");
+            }
+            else
+            {
+                yield return EnsureCsvParsedRoutine();
+                error = _csvParseError;
+
+                if (error == null)
+                {
+                    try
+                    {
+                        Bounds bounds = ComputeBounds(_csvPoints);
+                        DataSize = bounds.size;
+
+                        var result = Build2DTexture(_csvPoints, _csvValues, bounds, _csvSourceDescription);
+                        texture = result.texture;
+                        ValueMin = result.valueMin;
+                        ValueMax = result.valueMax;
+                    }
+                    catch (Exception e)
+                    {
+                        error = e;
+                    }
+                }
+            }
+
+            if (error != null)
+            {
+                Debug.LogError($"[VtkFrameReader] BuildData(OnProcessTex2DData) failed " +
+                                $"(AddressableKey='{AddressableKey}', FilePath='{FilePath}'): {error}");
+                callback?.Invoke(new Progress { Status = eStatus.ERROR, ProgressValue = 0f }, null);
+                yield break;
+            }
+
+            Debug.Log($"[VtkFrameReader] Built 2D slice texture: {texture.width}x{texture.height}");
+            callback?.Invoke(new Progress { Status = eStatus.SUCCESS, ProgressValue = 1f }, texture);
         }
 
         // Parses this instance's CSV source (Addressable TextAsset or disk
@@ -668,6 +744,115 @@ namespace Monospark
             if (axisSize < DegenerateAxisSize)
                 return 1;
             return Mathf.Clamp(Mathf.RoundToInt(axisSize / voxelEdge), MinResolution, MaxResolution);
+        }
+
+        // Same bucket-and-average voxelization as ToTexture3D, but over just
+        // the two axes that actually vary -- degenerateAxis (found via
+        // FindDegenerateAxis) is dropped entirely rather than padded/clamped
+        // into a 1-voxel-thick third dimension. (U, V) are the remaining two
+        // axes in X/Y/Z order, e.g. X degenerate -> (Y, Z); Z degenerate ->
+        // (X, Y). Vector3's indexer (v[axis]) reads whichever component
+        // uAxis/vAxis names without a per-axis switch.
+        static (Texture2D texture, float valueMin, float valueMax) Build2DTexture(
+            Vector3[] points, float[] values, Bounds bounds, string sourceDescription)
+        {
+            if (points.Length == 0)
+                throw new InvalidDataException($"No points found in {sourceDescription}.");
+
+            int degenerateAxis = FindDegenerateAxis(bounds.size, sourceDescription);
+            int uAxis = degenerateAxis == 0 ? 1 : 0;
+            int vAxis = degenerateAxis == 2 ? 1 : 2;
+
+            Vector3 min = bounds.min;
+            Vector3 size = bounds.size;
+            float sizeU = size[uAxis];
+            float sizeV = size[vAxis];
+
+            (int resU, int resV) = Compute2DResolution(points.Length, sizeU, sizeV);
+
+            int voxelCountTotal = resU * resV;
+            var voxelSum = new float[voxelCountTotal];
+            var voxelHits = new int[voxelCountTotal];
+
+            float minValue = float.MaxValue;
+            float maxValue = float.MinValue;
+
+            for (int i = 0; i < points.Length; i++)
+            {
+                Vector3 p = points[i];
+                int vu = Mathf.Clamp((int)((p[uAxis] - min[uAxis]) / sizeU * resU), 0, resU - 1);
+                int vv = Mathf.Clamp((int)((p[vAxis] - min[vAxis]) / sizeV * resV), 0, resV - 1);
+                int index = vu + vv * resU;
+
+                float value = values[i];
+                voxelSum[index] += value;
+                voxelHits[index]++;
+
+                minValue = Mathf.Min(minValue, value);
+                maxValue = Mathf.Max(maxValue, value);
+            }
+
+            float range = Mathf.Max(maxValue - minValue, Mathf.Epsilon);
+            var colors = new Color[voxelCountTotal];
+            for (int i = 0; i < voxelCountTotal; i++)
+            {
+                if (voxelHits[i] == 0)
+                {
+                    colors[i] = Color.clear;
+                    continue;
+                }
+                float normalized = (voxelSum[i] / voxelHits[i] - minValue) / range;
+                colors[i] = new Color(normalized, normalized, normalized, 1f);
+            }
+
+            // Same RGBAHalf/.r=value/.a=occupancy convention as ToTexture3D,
+            // so VolumeSlicePlane.shader's _Use2DSlice sampling code reads
+            // identically to its Texture3D path (just one fewer UV axis).
+            var texture = new Texture2D(resU, resV, TextureFormat.RGBAHalf, false)
+            {
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear
+            };
+            texture.SetPixels(colors);
+            texture.Apply();
+
+            return (texture, minValue, maxValue);
+        }
+
+        // Confirms bounds has EXACTLY one degenerate axis (see
+        // DegenerateAxisSize) -- a genuine single 2D slice -- and returns
+        // which one (0=X, 1=Y, 2=Z). Throws for a real 3D volume (zero
+        // degenerate axes) or a line/point cloud (more than one), since
+        // neither is representable as a single 2D texture.
+        static int FindDegenerateAxis(Vector3 size, string sourceDescription)
+        {
+            bool xDeg = size.x < DegenerateAxisSize;
+            bool yDeg = size.y < DegenerateAxisSize;
+            bool zDeg = size.z < DegenerateAxisSize;
+
+            int degenerateCount = (xDeg ? 1 : 0) + (yDeg ? 1 : 0) + (zDeg ? 1 : 0);
+            if (degenerateCount != 1)
+            {
+                throw new InvalidDataException(
+                    $"'{sourceDescription}' isn't a single 2D slice -- expected exactly one axis with no " +
+                    $"real spatial extent, found {degenerateCount} (bounds size {size}). Use " +
+                    $"BuildData(OnProcessTex3DData) instead for a genuine 3D volume.");
+            }
+
+            return xDeg ? 0 : (yDeg ? 1 : 2);
+        }
+
+        // Same idea as ComputeResolution, but for an area instead of a
+        // volume: voxel edge length = square root of (bounds area / sample
+        // count), clamped to the same sane texture size range.
+        static (int u, int v) Compute2DResolution(int sampleCount, float sizeU, float sizeV)
+        {
+            float area = Mathf.Max(sizeU * sizeV, Mathf.Epsilon);
+            float voxelEdge = Mathf.Sqrt(area / Mathf.Max(sampleCount, 1));
+
+            int resU = Mathf.Clamp(Mathf.RoundToInt(sizeU / voxelEdge), MinResolution, MaxResolution);
+            int resV = Mathf.Clamp(Mathf.RoundToInt(sizeV / voxelEdge), MinResolution, MaxResolution);
+            return (resU, resV);
         }
 
         // Minimal MonoBehaviour host for BuildData's coroutine -- VtkFrameReader

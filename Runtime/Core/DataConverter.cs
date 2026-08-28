@@ -1,3 +1,4 @@
+using System;
 using System.IO;
 using UnityEngine;
 
@@ -29,6 +30,7 @@ namespace Monospark
         }
         
         public delegate void OnProcessTex3DData(Progress progress,Texture3D texture3D);
+        public delegate void OnProcessTex2DData(Progress progress,Texture2D texture2D);
         public delegate void OnProcessBufferData(Progress progress,VtkUnstructuredGridData buffer);
         public delegate void OnProcessFrameSequenceData(Progress progress,VtkFrameSequenceData sequence);
 
@@ -91,5 +93,16 @@ namespace Monospark
         public abstract void BuildData(OnProcessTex3DData callback);
         public abstract void BuildData(OnProcessBufferData callback);
         public abstract void BuildData(OnProcessFrameSequenceData callback);
+
+        // Not abstract, unlike the three above: a 2D slice texture is a
+        // niche output (currently only VtkFrameReader, for a CSV source
+        // that's ALREADY effectively 2D -- see its own override) that
+        // shouldn't force every other converter to implement/reject it.
+        // Defaults to the same "unsupported" behavior those converters
+        // already hand-roll for their own inapplicable BuildData overloads.
+        public virtual void BuildData(OnProcessTex2DData callback)
+        {
+            throw new NotSupportedException($"{GetType().Name} does not produce a 2D texture.");
+        }
     }
 }

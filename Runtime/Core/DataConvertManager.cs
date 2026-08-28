@@ -42,5 +42,13 @@ namespace Monospark
             converter.InitFromPath(filepath, pathMode);
             converter.BuildData(bufferData);
         }
+
+        // Same as above, for the OnProcessTex2DData overload (VtkFrameReader's
+        // direct-2D-slice output -- see its BuildData(OnProcessTex2DData)).
+        public void GetMap(DataConverter.OnProcessTex2DData tex2DData, string filepath, DataConverter converter, DataPathMode pathMode = DataPathMode.Disk)
+        {
+            converter.InitFromPath(filepath, pathMode);
+            converter.BuildData(tex2DData);
+        }
     }
 }

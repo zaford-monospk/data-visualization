@@ -213,6 +213,45 @@ namespace Monospark
             return CreateVolumeStatic(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets);
         }
 
+        // Same _CFDVolume/VolumeStatic prefab as CreateVolumeStatic, but
+        // drives TargetPlane/SliceMaterial directly via
+        // VtkFrameRenderer.SetSlice2D (VolumeSlicePlane.shader's _Use2DSlice
+        // mode) instead of TargetCube/Material's raymarched Texture3D path --
+        // for a CSV that's ALREADY effectively a single 2D slice (e.g. a CFD
+        // "X1"/"X2" plane-cut export, see VtkFrameReader.BuildData(
+        // OnProcessTex2DData)). onComplete(false) fires if the CSV isn't
+        // genuinely planar (not exactly one degenerate axis) as well as on
+        // any other load failure. TargetCube/Material are left completely
+        // untouched by this call -- only the slice plane shows this data.
+        public VtkFrameRenderer CreateSlice2DFromCsv(
+            string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
+        {
+            GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
+            var renderer = instance.GetComponent<VtkFrameRenderer>();
+            if (renderer == null)
+                throw new MissingComponentException($"{_raymarchVolumeStatic} prefab has no {nameof(VtkFrameRenderer)}.");
+
+            var reader = new VtkFrameReader { WorldUp = worldUp };
+
+            void OnTexture2DReady(DataConverter.Progress progress, Texture2D texture)
+            {
+                switch (progress.Status)
+                {
+                    case DataConverter.eStatus.SUCCESS:
+                        renderer.SetSlice2D(texture);
+                        onComplete?.Invoke(true);
+                        break;
+                    case DataConverter.eStatus.ERROR:
+                        onComplete?.Invoke(false);
+                        break;
+                }
+            }
+
+            instance.AddComponent<DataConvertManager>().GetMap(OnTexture2DReady, dataPath, reader, pathMode);
+            return renderer;
+        }
+
         static GameObject InstantiatePrefab(string resourcePath, Vector3 worldPosition, Quaternion rotation)
         {
             var prefab = Resources.Load<GameObject>(resourcePath);
