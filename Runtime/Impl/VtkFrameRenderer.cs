@@ -77,16 +77,25 @@ namespace Monospark
             // referencing the same Material asset (e.g. two instances of the
             // same prefab) would otherwise stomp on each other's texture,
             // clip range, and shader every time either one calls Set()/
-            // SetMaterialFloat()/SetShader().
+            // SetMaterialFloat()/SetShader(). Cloning the field alone isn't
+            // enough, though -- TargetCube/TargetPlane's MeshRenderer was
+            // wired to the ORIGINAL asset in the prefab/Inspector, so it has
+            // to be re-pointed at the clone explicitly, or the mesh keeps
+            // showing the untouched original while every SetTexture/SetFloat
+            // call lands on a clone nothing is actually rendering with.
             if (Material != null)
             {
                 _materialInstance = new Material(Material);
                 Material = _materialInstance;
+                if (TargetCube != null && TargetCube.TryGetComponent<Renderer>(out var cubeRenderer))
+                    cubeRenderer.sharedMaterial = _materialInstance;
             }
             if (SliceMaterial != null)
             {
                 _sliceMaterialInstance = new Material(SliceMaterial);
                 SliceMaterial = _sliceMaterialInstance;
+                if (TargetPlane != null && TargetPlane.TryGetComponent<Renderer>(out var planeRenderer))
+                    planeRenderer.sharedMaterial = _sliceMaterialInstance;
             }
 
 #if UNITY_WEBGL

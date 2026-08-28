@@ -42,11 +42,18 @@ namespace Monospark
         void Awake()
         {
             // Per-instance copy, not the shared prefab/scene Material asset
-            // directly -- see the class doc comment.
+            // directly -- see the class doc comment. Cloning the field alone
+            // isn't enough, though -- TargetCube's MeshRenderer was wired to
+            // the ORIGINAL asset in the prefab/Inspector, so it has to be
+            // re-pointed at the clone explicitly, or the mesh keeps showing
+            // the untouched original while every SetTexture/SetFloat call
+            // lands on a clone nothing is actually rendering with.
             if (Material != null)
             {
                 _materialInstance = new Material(Material);
                 Material = _materialInstance;
+                if (TargetCube != null && TargetCube.TryGetComponent<Renderer>(out var cubeRenderer))
+                    cubeRenderer.sharedMaterial = _materialInstance;
             }
         }
 
