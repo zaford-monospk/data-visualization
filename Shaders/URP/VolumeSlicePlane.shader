@@ -62,11 +62,16 @@ Shader "Custom/VolumeSlicePlane"
             // face is ever rasterized toward the camera.
             Cull Off
             ZWrite Off
-            // Always: consistent with VolumeRenderer.shader, draws over
-            // opaque geometry in its screen footprint. There's no embedded-
-            // object occlusion feature to reproduce here (that clips a
-            // raymarch range; a slice has no range, just one sample).
-            ZTest Always
+            // LEqual (not Always like VolumeRenderer.shader): this is a real
+            // single-sample plane, not a raymarched box, so each fragment's
+            // depth genuinely IS the sample's position -- unlike the cube,
+            // where Always was needed because the rasterized fragment is the
+            // box's far face, not wherever along the ray density was found.
+            // Here the ordinary hardware depth test against opaque geometry
+            // already written to the depth buffer is correct as-is, so a
+            // plane embedded behind/inside solid geometry gets occluded like
+            // any other transparent surface would.
+            ZTest LEqual
             Blend SrcAlpha OneMinusSrcAlpha
 
             HLSLPROGRAM
