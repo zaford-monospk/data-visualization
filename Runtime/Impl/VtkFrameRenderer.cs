@@ -31,6 +31,7 @@ namespace Monospark
         static readonly int VolumeWorldToLocalId = Shader.PropertyToID("_VolumeWorldToLocal");
         static readonly int LutStartTemperatureId = Shader.PropertyToID("_LutStartTemperature");
         static readonly int LutEndTemperatureId = Shader.PropertyToID("_LutEndTemperature");
+        static readonly int OpaqueId = Shader.PropertyToID("_Opaque");
 
 #if UNITY_WEBGL
         // VolumeRenderer.shader's scene-depth occlusion clip reads back
@@ -306,6 +307,23 @@ namespace Monospark
                 SliceMaterial.SetFloat(LutStartTemperatureId, start01);
                 SliceMaterial.SetFloat(LutEndTemperatureId, end01);
             }
+        }
+
+        // Sets the shader's _Opaque (on both Material and SliceMaterial) --
+        // true forces alpha to 1 wherever there's any in-range data at all
+        // (still 0/transparent where there's none), instead of the default
+        // density-based fade. Most useful for a 2D slice once
+        // VtkFrameReader.Build2DTexture's hole-filling has already made it
+        // fully occupied, where a value-based fade no longer means "no data
+        // here" and just looks like an unwanted see-through gradient.
+        public void SetOpaque(bool opaque)
+        {
+            float value = opaque ? 1f : 0f;
+
+            if (Material != null)
+                Material.SetFloat(OpaqueId, value);
+            if (SliceMaterial != null)
+                SliceMaterial.SetFloat(OpaqueId, value);
         }
 
         void OnDestroy()

@@ -792,22 +792,41 @@ namespace Monospark
                 maxValue = Mathf.Max(maxValue, value);
             }
 
+            // A scattered CFD point cloud is rarely uniformly dense across
+            // its bounds (denser near walls/features, sparser elsewhere),
+            // so Compute2DResolution's average-density sizing still leaves
+            // some cells with zero hits even though the resolution is
+            // "right" overall -- left blank, those show up as visible holes
+            // in what should read as one continuous field. FillEmptyCells
+            // replaces each one with its nearest actually-sampled
+            // neighbor's value (full occupancy, not faded) via a
+            // multi-source flood fill, so the slice looks like a real CFD
+            // contour plot instead of a sparse point scatter with gaps.
+            var cellValue = new float[voxelCountTotal];
+            var hasValue = new bool[voxelCountTotal];
+            for (int i = 0; i < voxelCountTotal; i++)
+            {
+                if (voxelHits[i] == 0)
+                    continue;
+                cellValue[i] = voxelSum[i] / voxelHits[i];
+                hasValue[i] = true;
+            }
+            FillEmptyCells(cellValue, hasValue, resU, resV);
+
             float range = Mathf.Max(maxValue - minValue, Mathf.Epsilon);
             var colors = new Color[voxelCountTotal];
             for (int i = 0; i < voxelCountTotal; i++)
             {
-                if (voxelHits[i] == 0)
-                {
-                    colors[i] = Color.clear;
-                    continue;
-                }
-                float normalized = (voxelSum[i] / voxelHits[i] - minValue) / range;
+                float normalized = (cellValue[i] - minValue) / range;
                 colors[i] = new Color(normalized, normalized, normalized, 1f);
             }
 
             // Same RGBAHalf/.r=value/.a=occupancy convention as ToTexture3D,
             // so VolumeSlicePlane.shader's _Use2DSlice sampling code reads
-            // identically to its Texture3D path (just one fewer UV axis).
+            // identically to its Texture3D path (just one fewer UV axis) --
+            // occupancy (.a/g) is uniformly 1 here since FillEmptyCells
+            // leaves nothing unfilled (barring a genuinely empty grid,
+            // already ruled out by the points.Length == 0 check above).
             var texture = new Texture2D(resU, resV, TextureFormat.RGBAHalf, false)
             {
                 wrapMode = TextureWrapMode.Clamp,
@@ -817,6 +836,51 @@ namespace Monospark
             texture.Apply();
 
             return (texture, minValue, maxValue);
+        }
+
+        // Multi-source BFS flood fill: seeds the queue with every cell that
+        // already hasValue, then spreads each one outward (4-connected) to
+        // its not-yet-valued neighbors one grid step at a time. Every cell
+        // ends up with the value of whichever originally-sampled cell is
+        // NEAREST to it in grid steps -- O(resU*resV) total since each cell
+        // is enqueued/dequeued exactly once, regardless of how many empty
+        // cells surround a given sample.
+        static void FillEmptyCells(float[] cellValue, bool[] hasValue, int resU, int resV)
+        {
+            var queue = new Queue<int>();
+            for (int i = 0; i < hasValue.Length; i++)
+            {
+                if (hasValue[i])
+                    queue.Enqueue(i);
+            }
+
+            while (queue.Count > 0)
+            {
+                int index = queue.Dequeue();
+                int u = index % resU;
+                int v = index / resU;
+                float value = cellValue[index];
+
+                TryPropagate(u - 1, v, resU, resV, value, cellValue, hasValue, queue);
+                TryPropagate(u + 1, v, resU, resV, value, cellValue, hasValue, queue);
+                TryPropagate(u, v - 1, resU, resV, value, cellValue, hasValue, queue);
+                TryPropagate(u, v + 1, resU, resV, value, cellValue, hasValue, queue);
+            }
+        }
+
+        static void TryPropagate(
+            int u, int v, int resU, int resV, float value, float[] cellValue, bool[] hasValue, Queue<int> queue)
+        {
+            if (u < 0 || u >= resU || v < 0 || v >= resV)
+                return;
+
+            int index = u + v * resU;
+            if (hasValue[index])
+                return;
+
+            cellValue[index] = value;
+            hasValue[index] = true;
+            queue.Enqueue(index);
         }
 
         // Confirms bounds has EXACTLY one degenerate axis (see

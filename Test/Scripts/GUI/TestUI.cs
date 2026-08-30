@@ -43,10 +43,17 @@ namespace Monospark
         WorldUpAxis _volumeStaticWorldUp;
         WorldUpAxis _volumeSlice2DWorldUp;
 
-        IRenderStateControl _volumeStatic;
+        // Concrete VtkFrameRenderer, not just IRenderStateControl -- both
+        // sections now need renderer-specific methods the interface doesn't
+        // have (SetOpaque here, plus SetSliceVisibility for the 2D slice
+        // below), though DrawVisibilityToggle/DrawClipRangeControls below
+        // still take it as an IRenderStateControl, same as before.
+        VtkFrameRenderer _volumeStatic;
         VtkFrameRenderer _volumeSlice2D;
         bool _volumeStaticVisible = true;
         bool _volumeSlice2DVisible = true;
+        bool _volumeStaticOpaque;
+        bool _volumeSlice2DOpaque;
         bool _volumeStaticLoading;
         bool _volumeSlice2DLoading;
         string _volumeStaticPathError;
@@ -56,7 +63,7 @@ namespace Monospark
         bool _collapsed;
 
         const float PanelWidth = 380f;
-        const float PanelHeight = 620f;
+        const float PanelHeight = 660f;
         const float HeaderHeight = 30f;
 
         static GUIStyle _errorStyle;
@@ -130,7 +137,7 @@ namespace Monospark
                     _volumeStaticLoading = true;
                     _volumeStatic = CFDFactory.Instance.CreateVolumeStatic(
                         resolvedPath, VolumeStaticPosition, Quaternion.Euler(VolumeStaticEulerRotation),
-                        _ => _volumeStaticLoading = false, _volumeStaticWorldUp);
+                        _ => _volumeStaticLoading = false, _volumeStaticWorldUp, opaque: _volumeStaticOpaque);
                     _volumeStaticVisible = true;
                     // Read the prefab-configured material's actual current values
                     // rather than assuming the slider defaults (0/1) match them.
@@ -145,6 +152,7 @@ namespace Monospark
 
             DrawVisibilityToggle(_volumeStatic, ref _volumeStaticVisible, _volumeStaticLoading);
             DrawClipRangeControls(_volumeStatic, "_ClipMin", "_ClipMax", ref _volumeStaticClipMin, ref _volumeStaticClipMax, 100f, "°C");
+            DrawOpaqueToggle(_volumeStatic, ref _volumeStaticOpaque);
         }
 
         // Through VtkFrameReader/VtkFrameRenderer -- reads a CSV that's
@@ -192,7 +200,7 @@ namespace Monospark
                     _volumeSlice2DLoading = true;
                     _volumeSlice2D = CFDFactory.Instance.CreateSlice2DFromCsv(
                         resolvedPath, VolumeSlice2DPosition, Quaternion.Euler(VolumeSlice2DEulerRotation),
-                        _ => _volumeSlice2DLoading = false, _volumeSlice2DWorldUp);
+                        _ => _volumeSlice2DLoading = false, _volumeSlice2DWorldUp, opaque: _volumeSlice2DOpaque);
                     _volumeSlice2DVisible = true;
                 }
             }
@@ -208,6 +216,8 @@ namespace Monospark
                 _volumeSlice2D?.SetSliceVisibility(_volumeSlice2DVisible);
             }
             GUI.enabled = true;
+
+            DrawOpaqueToggle(_volumeSlice2D, ref _volumeSlice2DOpaque);
         }
 
         // Editor-only: there's no cross-platform runtime file/folder picker
@@ -268,6 +278,20 @@ namespace Monospark
             {
                 isVisible = !isVisible;
                 control?.SetVisibility(isVisible);
+            }
+            GUI.enabled = true;
+        }
+
+        // SetOpaque isn't on IRenderStateControl (only VtkFrameRenderer has
+        // it), so this takes the concrete type rather than matching
+        // DrawVisibilityToggle/DrawClipRangeControls above.
+        static void DrawOpaqueToggle(VtkFrameRenderer renderer, ref bool isOpaque)
+        {
+            GUI.enabled = renderer != null;
+            if (GUILayout.Button(isOpaque ? "Opaque: On" : "Opaque: Off"))
+            {
+                isOpaque = !isOpaque;
+                renderer?.SetOpaque(isOpaque);
             }
             GUI.enabled = true;
         }

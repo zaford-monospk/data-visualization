@@ -32,6 +32,11 @@ Shader "Custom/VolumeRenderer_WebGL"
         // lower toward 0 for a more solid/filled look at the cost of visible
         // banding if _StepCount is too low to hide it otherwise.
         _JitterStrength("Jitter Strength (0 = filled, banding)", Range(0, 1)) = 1
+        // 0 (default) = alpha follows accumulated density, same as before.
+        // 1 = fully opaque wherever the ray hit ANY in-range data at all,
+        // regardless of how much -- still 0/transparent where the ray hit
+        // nothing (accumulatedAlpha stays exactly 0) or exited the box.
+        _Opaque("Opaque (alpha = 1 where hit)", Range(0, 1)) = 0
     }
 
     SubShader
@@ -83,6 +88,7 @@ Shader "Custom/VolumeRenderer_WebGL"
                 float _JitterStrength;
                 float _LutStartTemperature;
                 float _LutEndTemperature;
+                float _Opaque;
             CBUFFER_END
 
             struct Attributes
@@ -212,7 +218,12 @@ Shader "Custom/VolumeRenderer_WebGL"
                     samplePos += rayDirOS * stepSize;
                 }
 
-                return half4(accumulatedColor, accumulatedAlpha);
+                // _Opaque overrides the accumulated density-based fade with
+                // a hard 0/1: still 0 wherever the ray never hit any
+                // in-range data, but fully opaque wherever it hit anything
+                // at all -- see the property's own doc comment.
+                half alpha = (_Opaque > 0.5 && accumulatedAlpha > 0.0) ? 1.0 : accumulatedAlpha;
+                return half4(accumulatedColor, alpha);
             }
             ENDHLSL
         }

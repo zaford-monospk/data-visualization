@@ -160,15 +160,20 @@ namespace Monospark
         // static raymarched volume (VolumeRenderer.shader), no playback.
         // Returned immediately; Set() runs once the async load completes.
         // onComplete (true = success, false = error) fires once on that
-        // terminal status.
+        // terminal status. opaque is applied immediately (VtkFrameRenderer.
+        // SetOpaque doesn't depend on the texture having loaded) -- forces
+        // alpha to 1 wherever the raymarch hits any in-range data, instead
+        // of the default density-based fade.
         public VtkFrameRenderer CreateVolumeStatic(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk, bool opaque = false)
         {
             GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
             var renderer = instance.GetComponent<VtkFrameRenderer>();
             if (renderer == null)
                 throw new MissingComponentException($"{_raymarchVolumeStatic} prefab has no {nameof(VtkFrameRenderer)}.");
+
+            renderer.SetOpaque(opaque);
 
             // Constructed directly (not GetMap<VtkFrameReader>) so WorldUp can
             // be set before Init/BuildData run, and DataSize/ValueMin/ValueMax
@@ -208,9 +213,9 @@ namespace Monospark
         // directly with dataPath set to the Addressable's address/key.
         public VtkFrameRenderer CreateVolumeStaticFromStreamingAssets(
             string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y)
+            WorldUpAxis worldUp = WorldUpAxis.Y, bool opaque = false)
         {
-            return CreateVolumeStatic(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets);
+            return CreateVolumeStatic(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets, opaque);
         }
 
         // Same _CFDVolume/VolumeStatic prefab as CreateVolumeStatic, but
@@ -223,14 +228,23 @@ namespace Monospark
         // genuinely planar (not exactly one degenerate axis) as well as on
         // any other load failure. TargetCube/Material are left completely
         // untouched by this call -- only the slice plane shows this data.
+        // opaque is applied immediately (VtkFrameRenderer.SetOpaque doesn't
+        // depend on the texture having loaded) -- forces the slice's alpha
+        // to 1 wherever it's within [_ClipMin, _ClipMax], instead of the
+        // default value-based fade, which is usually what you want once
+        // Build2DTexture's hole-filling has already made the slice fully
+        // occupied (a fade there no longer means "no data", just an
+        // unwanted see-through gradient).
         public VtkFrameRenderer CreateSlice2DFromCsv(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk, bool opaque = false)
         {
             GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
             var renderer = instance.GetComponent<VtkFrameRenderer>();
             if (renderer == null)
                 throw new MissingComponentException($"{_raymarchVolumeStatic} prefab has no {nameof(VtkFrameRenderer)}.");
+
+            renderer.SetOpaque(opaque);
 
             var reader = new VtkFrameReader { WorldUp = worldUp };
 

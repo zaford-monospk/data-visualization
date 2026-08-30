@@ -39,6 +39,14 @@ Shader "Custom/VolumeSlicePlane"
         // (the original behavior). 1 = sample _VolumeSlice2D (Texture2D)
         // directly via the plane mesh's own UV -- see the header comment.
         _Use2DSlice("Use 2D Slice Texture", Range(0, 1)) = 0
+        // 0 (default) = alpha follows density, same as before (fades out
+        // for low values / fades to nothing outside [_ClipMin, _ClipMax]).
+        // 1 = fully opaque wherever the sample is in-range at all, regardless
+        // of its value -- still 0/transparent outside [_ClipMin, _ClipMax]
+        // or outside the volume's box. Useful once FillEmptyCells (see
+        // VtkFrameReader.Build2DTexture) has already made a 2D slice fully
+        // occupied, so a see-through look no longer means "no data here".
+        _Opaque("Opaque (alpha = 1 in range)", Range(0, 1)) = 0
     }
 
     SubShader
@@ -86,6 +94,7 @@ Shader "Custom/VolumeSlicePlane"
                 float _LutStartTemperature;
                 float _LutEndTemperature;
                 float _Use2DSlice;
+                float _Opaque;
             CBUFFER_END
 
             // Set every frame from C# (VtkFrameRenderer.LateUpdate) as
@@ -169,7 +178,12 @@ Shader "Custom/VolumeSlicePlane"
                 half3 sampleColor = SAMPLE_TEXTURE2D_LOD(
                     _TemperatureLUT, sampler_TemperatureLUT, float2(lutU, 0.5), 0).rgb;
 
-                return half4(sampleColor, density);
+                // _Opaque overrides the value-based fade with a hard 0/1:
+                // still 0 outside [_ClipMin, _ClipMax] (inRange), but fully
+                // opaque everywhere inside it regardless of the sampled
+                // value -- see the property's own doc comment.
+                half alpha = _Opaque > 0.5 ? inRange : density;
+                return half4(sampleColor, alpha);
             }
             ENDHLSL
         }
