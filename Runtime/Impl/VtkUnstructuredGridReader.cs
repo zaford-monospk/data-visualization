@@ -22,14 +22,15 @@ namespace Monospark
         const int StreamBufferSize = 1 << 20; // 1 MB — fewer underlying reads over a ~4M-line file
 
         // Fixed Celsius calibration range ToTexture3D's r channel is
-        // normalized against -- NOT this file's own local min/max. See
-        // VtkFrameReader.TemperatureRangeMin's doc comment for why (two
+        // normalized against -- NOT this file's own local min/max. Two
         // different exports of the same physical space can have very
         // different local temperature spreads, which made the same color
         // mean a different absolute temperature depending on which file it
-        // came from). Must match VtkFrameReader's identical constants (kept
-        // duplicated rather than shared, same as MinResolution/MaxResolution
-        // above).
+        // came from. This reader only ever reads a single .vtk SCALARS
+        // field (FieldName), always treated as temperature, so unlike
+        // VtkFrameReader's InfoTypes-driven, per-data-kind LUT range (see
+        // VtkFrameReader.Info's doc comment), a single fixed constant is
+        // still all this class needs.
         const float TemperatureRangeMin = 0f;
         const float TemperatureRangeMax = 100f;
 

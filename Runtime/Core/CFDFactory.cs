@@ -163,10 +163,17 @@ namespace Monospark
         // terminal status. opaque is applied immediately (VtkFrameRenderer.
         // SetOpaque doesn't depend on the texture having loaded) -- forces
         // alpha to 1 wherever the raymarch hits any in-range data, instead
-        // of the default density-based fade.
+        // of the default density-based fade. info picks which of a
+        // multi-field CFD CSV export's columns (Temperature, Velocity
+        // magnitude, PMV, RH -- see eDataType) to voxelize and the fixed
+        // calibration range it's normalized against (VtkFrameReader.Info) --
+        // null (the default) falls back to Temperature/[0, 100]°C, this
+        // reader's original behavior. Ignored for a .vtk source, which only
+        // ever reads FieldName's single field.
         public VtkFrameRenderer CreateVolumeStatic(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk, bool opaque = false)
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk, bool opaque = false,
+            InfoTypes info = null)
         {
             GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
             var renderer = instance.GetComponent<VtkFrameRenderer>();
@@ -181,10 +188,13 @@ namespace Monospark
             // fires -- reader.DataSize is the source file's real-world extent
             // when it had usable bounds (.vtk POINTS / .csv X-Y-Z), which
             // sizes TargetCube far more meaningfully than its voxel-grid
-            // resolution; reader.ValueMin/ValueMax is the raw Celsius range
-            // the Texture3D was normalized against, passed to renderer.Set so
-            // SetLutTemperatureRange can later convert real Celsius values.
+            // resolution; reader.ValueMin/ValueMax is the fixed calibration
+            // range (info.LUTStarts/LUTEnds) the Texture3D was normalized
+            // against, passed to renderer.Set so SetLutTemperatureRange can
+            // later convert a real value in that same range.
             var reader = new VtkFrameReader { WorldUp = worldUp };
+            if (info != null)
+                reader.Info = info;
 
             void OnTextureReady(DataConverter.Progress progress, Texture3D texture)
             {
@@ -213,9 +223,9 @@ namespace Monospark
         // directly with dataPath set to the Addressable's address/key.
         public VtkFrameRenderer CreateVolumeStaticFromStreamingAssets(
             string relativePath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y, bool opaque = false)
+            WorldUpAxis worldUp = WorldUpAxis.Y, bool opaque = false, InfoTypes info = null)
         {
-            return CreateVolumeStatic(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets, opaque);
+            return CreateVolumeStatic(relativePath, worldPosition, rotation, onComplete, worldUp, DataPathMode.StreamingAssets, opaque, info);
         }
 
         // Same _CFDVolume/VolumeStatic prefab as CreateVolumeStatic, but
@@ -231,10 +241,14 @@ namespace Monospark
         // (unlike CreateVolumeStatic): VolumeSlicePlane.shader is always
         // fully opaque wherever it draws at all now (it clip()s away
         // out-of-range/unfilled pixels instead of fading them) -- see the
-        // shader's own header comment.
+        // shader's own header comment. info picks which of a multi-field
+        // CFD CSV export's columns (Temperature, Velocity magnitude, PMV,
+        // RH -- see eDataType) to voxelize and the fixed calibration range
+        // it's normalized against (VtkFrameReader.Info) -- null (the
+        // default) falls back to Temperature/[0, 100]°C.
         public VtkFrameRenderer CreateSlice2DFromCsv(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk, InfoTypes info = null)
         {
             GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
             var renderer = instance.GetComponent<VtkFrameRenderer>();
@@ -242,6 +256,8 @@ namespace Monospark
                 throw new MissingComponentException($"{_raymarchVolumeStatic} prefab has no {nameof(VtkFrameRenderer)}.");
 
             var reader = new VtkFrameReader { WorldUp = worldUp };
+            if (info != null)
+                reader.Info = info;
 
             void OnTexture2DReady(DataConverter.Progress progress, Texture2D texture)
             {
@@ -275,27 +291,38 @@ namespace Monospark
         // of handing the raw normalized-value texture to VolumeSlicePlane.
         // shader for per-frame LUT sampling, it bakes the final color into
         // every pixel itself, once, on the CPU: recovers each pixel's real
-        // Celsius value from the raw texture (normalized against the CSV's
-        // own min/max), remaps it into [minTemperatureCelsius,
-        // maxTemperatureCelsius] (same start/end convention as
-        // VtkFrameRenderer.SetLutTemperatureRange -- independent of the
-        // CSV's own range), and samples lutTexture at that U. The result is
-        // a plain color Texture2D any ordinary shader (a Standard/Lit/Unlit
+        // value from the raw texture (normalized against info's fixed
+        // calibration range -- VtkFrameReader.Info), remaps it into
+        // [lutDisplayMin, lutDisplayMax] (same start/end convention as
+        // VtkFrameRenderer.SetLutTemperatureRange -- independent of info's
+        // calibration range, so the LUT can zoom into a narrower band of
+        // it), and samples lutTexture at that U. The result is a plain
+        // color Texture2D any ordinary shader (a Standard/Lit/Unlit
         // material's albedo, for instance) can use directly, with no custom
         // shader or per-frame LUT logic required. lutTexture must have Read/
         // Write enabled (GetPixelBilinear needs CPU-side pixel access).
+        // info picks which of a multi-field CFD CSV export's columns
+        // (Temperature, Velocity magnitude, PMV, RH -- see eDataType) to
+        // voxelize -- null (the default) falls back to Temperature/[0,
+        // 100]°C, in which case lutDisplayMin/Max are Celsius; for any other
+        // DataType they're in whatever unit that column uses instead. See
+        // VtkFrameReader.Info's doc comment for why voxelization uses a
+        // fixed calibration range at all, distinct from this display range.
         // onComplete receives the baked texture on success, or null if the
         // CSV isn't genuinely planar (or any other load failure) -- there's
         // no "false" case to report otherwise, unlike the bool onComplete
         // callbacks above, since the texture itself IS the result.
         public void CreateSimpleTexture2DFromCsv(
-            string dataPath, Texture2D lutTexture, float minTemperatureCelsius, float maxTemperatureCelsius,
-            Action<Texture2D> onComplete, WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
+            string dataPath, Texture2D lutTexture, float lutDisplayMin, float lutDisplayMax,
+            Action<Texture2D> onComplete, WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk,
+            InfoTypes info = null)
         {
             if (lutTexture == null)
                 throw new ArgumentNullException(nameof(lutTexture));
 
             var reader = new VtkFrameReader { WorldUp = worldUp };
+            if (info != null)
+                reader.Info = info;
 
             void OnTexture2DReady(DataConverter.Progress progress, Texture2D rawTexture)
             {
@@ -304,7 +331,7 @@ namespace Monospark
                     case DataConverter.eStatus.SUCCESS:
                         Texture2D baked = BakeSimpleTexture2D(
                             rawTexture, lutTexture, reader.ValueMin, reader.ValueMax,
-                            minTemperatureCelsius, maxTemperatureCelsius);
+                            lutDisplayMin, lutDisplayMax);
                         Destroy(rawTexture); // only the baked copy is handed back -- the raw normalized texture was scratch data
                         onComplete?.Invoke(baked);
                         break;
@@ -322,27 +349,28 @@ namespace Monospark
             reader.BuildData((DataConverter.OnProcessTex2DData)OnTexture2DReady);
         }
 
-        // r is normalized 0..1 against the CSV's own [rawValueMin, rawValueMax]
-        // (see VtkFrameReader.Build2DTexture) -- recovers the real Celsius
+        // r is normalized 0..1 against the reader's own fixed calibration
+        // range [rawValueMin, rawValueMax] (VtkFrameReader.Info.LUTStarts/
+        // LUTEnds -- see VtkFrameReader.Build2DTexture) -- recovers the real
         // value from it, then remaps that into the LUT's own, independently
-        // chosen [minTemperatureCelsius, maxTemperatureCelsius] range before
-        // sampling, clamping out-of-range values to the nearest end's color
-        // rather than wrapping/extrapolating past it.
+        // chosen [lutDisplayMin, lutDisplayMax] range before sampling,
+        // clamping out-of-range values to the nearest end's color rather
+        // than wrapping/extrapolating past it.
         static Texture2D BakeSimpleTexture2D(
             Texture2D rawTexture, Texture2D lutTexture, float rawValueMin, float rawValueMax,
-            float minTemperatureCelsius, float maxTemperatureCelsius)
+            float lutDisplayMin, float lutDisplayMax)
         {
             Color[] rawPixels = rawTexture.GetPixels();
             var bakedPixels = new Color[rawPixels.Length];
 
             float rawRange = Mathf.Max(rawValueMax - rawValueMin, Mathf.Epsilon);
-            float lutRange = Mathf.Max(maxTemperatureCelsius - minTemperatureCelsius, Mathf.Epsilon);
+            float lutRange = Mathf.Max(lutDisplayMax - lutDisplayMin, Mathf.Epsilon);
 
             for (int i = 0; i < rawPixels.Length; i++)
             {
-                float celsius = rawValueMin + rawPixels[i].r * rawRange;
+                float value = rawValueMin + rawPixels[i].r * rawRange;
 
-                float u01 = Mathf.Clamp01((celsius - minTemperatureCelsius) / lutRange);
+                float u01 = Mathf.Clamp01((value - lutDisplayMin) / lutRange);
                 float u = Mathf.Lerp(LutEdgeInset, 1f - LutEdgeInset, u01);
 
                 bakedPixels[i] = lutTexture.GetPixelBilinear(u, 0.5f);

@@ -15,6 +15,21 @@ namespace Monospark
         Addressable,     // path is an Addressable address/key -- InitFromAddressable(path). Currently only VtkFrameReader's BuildData honors AddressableKey.
     }
 
+    public enum eDataType
+    {
+        Temperature,
+        Velocity,
+        PMV,
+        RH
+    }
+
+    public class InfoTypes
+    {
+        public eDataType DataType = eDataType.Temperature;
+        public float LUTStarts;
+        public float LUTEnds;
+    }
+
     public abstract class DataConverter
     {
         public class Progress

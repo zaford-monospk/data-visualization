@@ -22,6 +22,43 @@ namespace Monospark
         static readonly string[] PathModeLabels = { "Assets", "StreamingAssets", "Disk" };
         static readonly string[] WorldUpLabels = { "Y up", "Z up" };
 
+        // Order matches eDataType's declaration order exactly (SelectionGrid
+        // casts its int index straight to/from the enum).
+        static readonly string[] DataTypeLabels = { "Temperature", "Velocity", "PMV", "RH" };
+
+        // Sensible starting LUT calibration range per data type, applied
+        // when the selector below changes -- otherwise switching types
+        // would leave whatever range the previous type had (e.g.
+        // Temperature's [0, 100]) which makes no sense for, say, PMV
+        // (roughly -3..3). Purely a starting point for the LUT Start/End
+        // text fields -- freely editable afterward, same as any other field
+        // here.
+        static (float min, float max) DefaultLutRange(eDataType dataType)
+        {
+            switch (dataType)
+            {
+                case eDataType.Velocity: return (0f, 2f);   // m/s -- typical indoor airflow; raise for a vent/exhaust-heavy CSV
+                case eDataType.PMV: return (-3f, 3f);       // ASHRAE PMV's own fixed scale
+                case eDataType.RH: return (0f, 100f);       // %
+                default: return (0f, 100f);                 // Temperature, °C
+            }
+        }
+
+        // Cosmetic unit suffix for the clip-range labels below, matching
+        // each type's natural unit -- the actual numbers come from
+        // rangeMin/rangeMax passed into DrawClipRangeControls, this just
+        // labels them correctly.
+        static string DataTypeUnit(eDataType dataType)
+        {
+            switch (dataType)
+            {
+                case eDataType.Velocity: return " m/s";
+                case eDataType.PMV: return "";
+                case eDataType.RH: return "%";
+                default: return "°C";
+            }
+        }
+
         [Header("Volume Static (raymarch, single frame)")]
         public Vector3 VolumeStaticPosition;
         public Vector3 VolumeStaticEulerRotation;
@@ -43,6 +80,26 @@ namespace Monospark
         WorldUpAxis _volumeStaticWorldUp;
         WorldUpAxis _volumeSlice2DWorldUp;
 
+        // Which of a multi-field CFD CSV export's columns to voxelize (see
+        // eDataType/InfoTypes) -- forwarded to CFDFactory as an InfoTypes at
+        // Create. LutStart/EndText are the editable text fields (kept as
+        // strings, not floats, so a TextField mid-edit -- e.g. typing "-"
+        // before the rest of a negative number -- isn't stomped by
+        // reformatting the float back to text every frame); LutStart/End
+        // are the last successfully-parsed float, updated below whenever
+        // the text parses, and are what's actually sent to CFDFactory and
+        // used to scale the clip-range labels.
+        eDataType _volumeStaticDataType = eDataType.Temperature;
+        eDataType _volumeSlice2DDataType = eDataType.Temperature;
+        string _volumeStaticLutStartText = "0";
+        string _volumeStaticLutEndText = "100";
+        string _volumeSlice2DLutStartText = "0";
+        string _volumeSlice2DLutEndText = "100";
+        float _volumeStaticLutStart = 0f;
+        float _volumeStaticLutEnd = 100f;
+        float _volumeSlice2DLutStart = 0f;
+        float _volumeSlice2DLutEnd = 100f;
+
         // Concrete VtkFrameRenderer, not just IRenderStateControl -- both
         // sections now need renderer-specific methods the interface doesn't
         // have (SetOpaque here, plus SetSliceVisibility for the 2D slice
@@ -62,7 +119,7 @@ namespace Monospark
         bool _collapsed;
 
         const float PanelWidth = 380f;
-        const float PanelHeight = 640f;
+        const float PanelHeight = 760f;
         const float HeaderHeight = 30f;
 
         static GUIStyle _errorStyle;
@@ -116,6 +173,32 @@ namespace Monospark
             // and .csv X/Y/Z alike (see VtkFrameReader.WorldUp).
             _volumeStaticWorldUp = (WorldUpAxis)GUILayout.SelectionGrid((int)_volumeStaticWorldUp, WorldUpLabels, WorldUpLabels.Length);
 
+            // Which CSV column to voxelize (eDataType) and the fixed
+            // calibration range it's normalized against (InfoTypes.LUTStarts/
+            // LUTEnds) -- see the field group's own doc comment above.
+            // Ignored entirely for a .vtk source (CreateVolumeStatic docs
+            // this -- .vtk only ever reads FieldName's single field), so
+            // this only matters when Path Mode/the picked file is a CSV.
+            eDataType newVolumeStaticDataType = (eDataType)GUILayout.SelectionGrid((int)_volumeStaticDataType, DataTypeLabels, DataTypeLabels.Length);
+            if (newVolumeStaticDataType != _volumeStaticDataType)
+            {
+                _volumeStaticDataType = newVolumeStaticDataType;
+                (float defaultMin, float defaultMax) = DefaultLutRange(_volumeStaticDataType);
+                _volumeStaticLutStartText = defaultMin.ToString();
+                _volumeStaticLutEndText = defaultMax.ToString();
+            }
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("LUT", GUILayout.Width(30));
+            _volumeStaticLutStartText = GUILayout.TextField(_volumeStaticLutStartText);
+            GUILayout.Label("to", GUILayout.Width(20));
+            _volumeStaticLutEndText = GUILayout.TextField(_volumeStaticLutEndText);
+            GUILayout.EndHorizontal();
+            if (float.TryParse(_volumeStaticLutStartText, out float parsedStaticLutStart))
+                _volumeStaticLutStart = parsedStaticLutStart;
+            if (float.TryParse(_volumeStaticLutEndText, out float parsedStaticLutEnd))
+                _volumeStaticLutEnd = parsedStaticLutEnd;
+
             GUI.enabled = !_volumeStaticLoading;
             if (GUILayout.Button("Create"))
             {
@@ -134,9 +217,10 @@ namespace Monospark
                 {
                     DestroyIfExists(_volumeStatic);
                     _volumeStaticLoading = true;
+                    var info = new InfoTypes { DataType = _volumeStaticDataType, LUTStarts = _volumeStaticLutStart, LUTEnds = _volumeStaticLutEnd };
                     _volumeStatic = CFDFactory.Instance.CreateVolumeStatic(
                         resolvedPath, VolumeStaticPosition, Quaternion.Euler(VolumeStaticEulerRotation),
-                        _ => _volumeStaticLoading = false, _volumeStaticWorldUp, opaque: _volumeStaticOpaque);
+                        _ => _volumeStaticLoading = false, _volumeStaticWorldUp, opaque: _volumeStaticOpaque, info: info);
                     _volumeStaticVisible = true;
                     // Read the prefab-configured material's actual current values
                     // rather than assuming the slider defaults (0/1) match them.
@@ -150,7 +234,8 @@ namespace Monospark
                 GUILayout.Label(_volumeStaticPathError, ErrorStyle());
 
             DrawVisibilityToggle(_volumeStatic, ref _volumeStaticVisible, _volumeStaticLoading);
-            DrawClipRangeControls(_volumeStatic, "_ClipMin", "_ClipMax", ref _volumeStaticClipMin, ref _volumeStaticClipMax, 100f, "°C");
+            DrawClipRangeControls(_volumeStatic, "_ClipMin", "_ClipMax", ref _volumeStaticClipMin, ref _volumeStaticClipMax,
+                _volumeStaticLutStart, _volumeStaticLutEnd, DataTypeUnit(_volumeStaticDataType));
             DrawOpaqueToggle(_volumeStatic, ref _volumeStaticOpaque);
         }
 
@@ -181,6 +266,28 @@ namespace Monospark
             // the CSV's X/Y/Z columns (see VtkFrameReader.WorldUp).
             _volumeSlice2DWorldUp = (WorldUpAxis)GUILayout.SelectionGrid((int)_volumeSlice2DWorldUp, WorldUpLabels, WorldUpLabels.Length);
 
+            // Same DataType/LUT range config as Volume Static above -- see
+            // its own comment.
+            eDataType newVolumeSlice2DDataType = (eDataType)GUILayout.SelectionGrid((int)_volumeSlice2DDataType, DataTypeLabels, DataTypeLabels.Length);
+            if (newVolumeSlice2DDataType != _volumeSlice2DDataType)
+            {
+                _volumeSlice2DDataType = newVolumeSlice2DDataType;
+                (float defaultMin, float defaultMax) = DefaultLutRange(_volumeSlice2DDataType);
+                _volumeSlice2DLutStartText = defaultMin.ToString();
+                _volumeSlice2DLutEndText = defaultMax.ToString();
+            }
+
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("LUT", GUILayout.Width(30));
+            _volumeSlice2DLutStartText = GUILayout.TextField(_volumeSlice2DLutStartText);
+            GUILayout.Label("to", GUILayout.Width(20));
+            _volumeSlice2DLutEndText = GUILayout.TextField(_volumeSlice2DLutEndText);
+            GUILayout.EndHorizontal();
+            if (float.TryParse(_volumeSlice2DLutStartText, out float parsedSlice2DLutStart))
+                _volumeSlice2DLutStart = parsedSlice2DLutStart;
+            if (float.TryParse(_volumeSlice2DLutEndText, out float parsedSlice2DLutEnd))
+                _volumeSlice2DLutEnd = parsedSlice2DLutEnd;
+
             GUI.enabled = !_volumeSlice2DLoading;
             if (GUILayout.Button("Create"))
             {
@@ -199,9 +306,10 @@ namespace Monospark
                 {
                     DestroyIfExists(_volumeSlice2D);
                     _volumeSlice2DLoading = true;
+                    var info = new InfoTypes { DataType = _volumeSlice2DDataType, LUTStarts = _volumeSlice2DLutStart, LUTEnds = _volumeSlice2DLutEnd };
                     _volumeSlice2D = CFDFactory.Instance.CreateSlice2DFromCsv(
                         resolvedPath, VolumeSlice2DPosition, Quaternion.Euler(VolumeSlice2DEulerRotation),
-                        _ => _volumeSlice2DLoading = false, _volumeSlice2DWorldUp);
+                        _ => _volumeSlice2DLoading = false, _volumeSlice2DWorldUp, info: info);
                     _volumeSlice2DVisible = true;
                 }
             }
@@ -296,15 +404,18 @@ namespace Monospark
         }
 
         // Sliders always carry/send the raw normalized 0..1 value (what the
-        // shader actually expects) — displayScale/displayUnit only affect the
-        // label text, e.g. temperature shown as value*100 with a "°C" suffix.
+        // shader actually expects) — rangeMin/rangeMax/unit only affect the
+        // label text, lerping the 0..1 slider value into the real-world
+        // range the currently-loaded data was calibrated against (see
+        // InfoTypes.LUTStarts/LUTEnds) so e.g. PMV's [-3, 3] labels
+        // correctly instead of assuming a temperature-shaped [0, 100].
         static void DrawClipRangeControls(
             IRenderStateControl control, string minProperty, string maxProperty, ref float clipMin, ref float clipMax,
-            float displayScale = 1f, string displayUnit = "")
+            float rangeMin = 0f, float rangeMax = 1f, string unit = "")
         {
             GUI.enabled = control != null;
 
-            GUILayout.Label($"Min: {clipMin * displayScale:F1}{displayUnit}");
+            GUILayout.Label($"Min: {Mathf.Lerp(rangeMin, rangeMax, clipMin):F1}{unit}");
             float newMin = GUILayout.HorizontalSlider(clipMin, 0f, 1f);
             if (!Mathf.Approximately(newMin, clipMin))
             {
@@ -312,7 +423,7 @@ namespace Monospark
                 control?.SetMaterialFloat(minProperty, clipMin);
             }
 
-            GUILayout.Label($"Max: {clipMax * displayScale:F1}{displayUnit}");
+            GUILayout.Label($"Max: {Mathf.Lerp(rangeMin, rangeMax, clipMax):F1}{unit}");
             float newMax = GUILayout.HorizontalSlider(clipMax, 0f, 1f);
             if (!Mathf.Approximately(newMax, clipMax))
             {
