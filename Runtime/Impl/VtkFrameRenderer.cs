@@ -7,28 +7,26 @@ namespace Monospark
     // loop, no frame stepping, no interpolation state, just Material._Volume +
     // TargetCube scaled to the texture's dims, same as TestAction's static case.
     // Optionally also drives TargetPlane (VolumeSlicePlane.shader) as an
-    // independent cross-section view of the same Texture3D -- free to be
-    // positioned/rotated anywhere by the caller, kept in sync every frame via
-    // SliceMaterial's _VolumeWorldToLocal (see LateUpdate). TargetCube/Material
-    // and TargetPlane/SliceMaterial are both optional and independent: either,
+    // independent, already-2D CFD slice (SetSlice2D) -- e.g. a CFD "X1"/"X2"
+    // plane-cut CSV export (see VtkFrameReader.BuildData(OnProcessTex2DData)).
+    // TargetPlane no longer has anything to do with TargetCube's Texture3D:
+    // VolumeSlicePlane.shader used to also support reprojecting a cutting
+    // plane through that same volume, but that mode has been removed (see
+    // the shader's own header comment) -- TargetPlane only ever shows
+    // whatever SetSlice2D was last given. TargetCube/Material and
+    // TargetPlane/SliceMaterial are both optional and independent: either,
     // both, or neither can be visible at once. Material/SliceMaterial are
     // instanced per-component in Awake (see _materialInstance/_sliceMaterialInstance)
     // rather than used directly -- otherwise every renderer sharing the same
     // prefab's Material asset would stomp on each other's texture/clip
-    // range/shader. TargetPlane/SliceMaterial can alternatively show a
-    // direct 2D slice (SetSlice2D) instead of a Texture3D cross-section, for
-    // a source that's already inherently 2D -- see SetSlice2D's doc comment.
-    // SetSlice2D also drives TargetCube's visibility automatically (hidden
-    // while a 2D slice is showing, shown again once it's cleared), since the
-    // two are meant to be mutually exclusive views of the data, not both
-    // AND the 2D slice at once, the way TargetPlane's own 3D-reprojection
-    // mode is free to coexist with the cube.
+    // range/shader. SetSlice2D also drives TargetCube's visibility
+    // automatically (hidden while a 2D slice is showing, shown again once
+    // it's cleared), since the two are meant to be mutually exclusive views
+    // of the data, not both shown at once.
     public class VtkFrameRenderer : MonoBehaviour, IRenderStateControl
     {
         static readonly int VolumeId = Shader.PropertyToID("_Volume");
         static readonly int VolumeSlice2DId = Shader.PropertyToID("_VolumeSlice2D");
-        static readonly int Use2DSliceId = Shader.PropertyToID("_Use2DSlice");
-        static readonly int VolumeWorldToLocalId = Shader.PropertyToID("_VolumeWorldToLocal");
         static readonly int LutStartTemperatureId = Shader.PropertyToID("_LutStartTemperature");
         static readonly int LutEndTemperatureId = Shader.PropertyToID("_LutEndTemperature");
         static readonly int OpaqueId = Shader.PropertyToID("_Opaque");
@@ -47,12 +45,12 @@ namespace Monospark
         public Material Material;
         public Transform TargetCube; // optional: scaled to worldSize, or texture dims * FallbackScale if worldSize is unknown
 
-        // Optional cross-section slicer: a flat plane (any mesh/transform,
-        // not required to be parented under or aligned with TargetCube) that
-        // shows a single slice of the same Texture3D via VolumeSlicePlane.shader.
-        // SliceMaterial is a separate Material from Material/TargetCube's, not
-        // a shader swap on the same one -- both can be visible/tuned at once
-        // (e.g. a raymarched cube plus a cutaway slice through it).
+        // Optional 2D slice display: a flat plane (any mesh/transform, not
+        // required to be parented under or aligned with TargetCube) that
+        // shows an already-2D CFD slice via VolumeSlicePlane.shader and
+        // SetSlice2D -- unrelated to TargetCube's Texture3D. SliceMaterial
+        // is a separate Material from Material/TargetCube's, not a shader
+        // swap on the same one.
         public Transform TargetPlane;
         public Material SliceMaterial;
 
@@ -65,12 +63,9 @@ namespace Monospark
         // Floor applied to each axis of TargetCube.localScale in Set() -- a
         // source that's inherently planar (e.g. a CFD "X1"/"X2" plane-cut CSV
         // export, where every row shares the same X) reports a worldSize of
-        // ~0 along that axis. A truly (near-)zero-scale Transform makes
-        // TargetCube.worldToLocalMatrix singular, which breaks TargetPlane's
-        // _VolumeWorldToLocal reprojection (NaN/Inf math -> nothing renders
-        // on the slice plane) even though the raymarched cube itself still
-        // looks fine (just an imperceptibly thin box) -- so this needs
-        // clamping regardless of whether TargetPlane is even in use.
+        // ~0 along that axis. A truly zero-scale Transform is degenerate
+        // (singular localToWorldMatrix), so this keeps TargetCube an
+        // imperceptibly thin box instead, rather than an invalid one.
         public float MinAxisSize = 0.05f;
 
         Texture3D _texture;
@@ -134,18 +129,6 @@ namespace Monospark
 
             SetShader(webglShader);
 #endif
-        }
-
-        // TargetPlane and TargetCube can move independently (the plane is a
-        // free-form slicer, not parented under the cube), so the matrix that
-        // reprojects the plane's fragments into the volume's local space has
-        // to be refreshed every frame rather than once. LateUpdate (not
-        // Update) so this reads TargetCube's transform after anything else
-        // that might move it this frame has already run.
-        void LateUpdate()
-        {
-            if (SliceMaterial != null && TargetCube != null)
-                SliceMaterial.SetMatrix(VolumeWorldToLocalId, TargetCube.worldToLocalMatrix);
         }
 
         // TargetCube is what's actually drawn (a normal MeshRenderer), so
@@ -235,8 +218,6 @@ namespace Monospark
 
             if (Material != null)
                 Material.SetTexture(VolumeId, _texture);
-            if (SliceMaterial != null)
-                SliceMaterial.SetTexture(VolumeId, _texture);
             if (TargetCube != null && _texture != null)
             {
                 Vector3 size = worldSize ??
@@ -254,20 +235,17 @@ namespace Monospark
         }
 
         // Displays a 2D slice texture directly on TargetPlane via
-        // VolumeSlicePlane.shader's _Use2DSlice mode -- for a CSV source
-        // that's ALREADY a single 2D slice (e.g. a CFD "X1"/"X2" plane-cut
-        // export -- see VtkFrameReader.BuildData(OnProcessTex2DData)),
-        // skipping the whole 3D-volume-reprojection path Set() drives.
-        // Independent of Set()/TargetCube: a renderer can show a raymarched
-        // cube (via Set), a direct 2D slice (via this), or neither, but not
-        // both on the SAME SliceMaterial at once -- they're mutually
-        // exclusive sampling modes on that one shader (_Use2DSlice), so the
-        // most recent call between this and Set() wins for TargetPlane.
-        // Pass a non-null texture to enter 2D slice mode -- TargetCube is
-        // hidden automatically (SetVisibility(false)) since it'd otherwise
-        // still show whatever Texture3D Set() last gave it, alongside the
-        // slice. Pass null to switch SliceMaterial back to the 3D-volume
-        // mode, which shows TargetCube again (SetVisibility(true)).
+        // VolumeSlicePlane.shader -- for a CSV source that's ALREADY a
+        // single 2D slice (e.g. a CFD "X1"/"X2" plane-cut export -- see
+        // VtkFrameReader.BuildData(OnProcessTex2DData)). Entirely
+        // independent of Set()/TargetCube -- TargetPlane/SliceMaterial has
+        // no other mode any more (the shader's old 3D-volume-reprojection
+        // path was removed, see its header comment), so this is the only
+        // way TargetPlane ever shows anything. Pass a non-null texture to
+        // show it -- TargetCube is hidden automatically (SetVisibility(false))
+        // so the raymarched cube and the slice aren't both shown at once.
+        // Pass null to clear it, which shows TargetCube again
+        // (SetVisibility(true)).
         public void SetSlice2D(Texture2D texture)
         {
             if (_texture2D != null && _texture2D != texture)
@@ -276,10 +254,7 @@ namespace Monospark
             _texture2D = texture;
 
             if (SliceMaterial != null)
-            {
                 SliceMaterial.SetTexture(VolumeSlice2DId, _texture2D);
-                SliceMaterial.SetFloat(Use2DSliceId, _texture2D != null ? 1f : 0f);
-            }
 
             SetVisibility(_texture2D == null);
         }
@@ -309,21 +284,18 @@ namespace Monospark
             }
         }
 
-        // Sets the shader's _Opaque (on both Material and SliceMaterial) --
-        // true forces alpha to 1 wherever there's any in-range data at all
-        // (still 0/transparent where there's none), instead of the default
-        // density-based fade. Most useful for a 2D slice once
-        // VtkFrameReader.Build2DTexture's hole-filling has already made it
-        // fully occupied, where a value-based fade no longer means "no data
-        // here" and just looks like an unwanted see-through gradient.
+        // Sets Material's _Opaque -- true forces alpha to 1 wherever the
+        // raymarch hits any in-range data at all (still 0/transparent where
+        // it hits none), instead of the default density-based fade. Only
+        // affects the raymarched cube (Material) -- VolumeSlicePlane.shader
+        // (SliceMaterial) has no such property any more: it's always fully
+        // opaque wherever it draws at all, and clip()s away everything else
+        // (out-of-range or unfilled data) instead of fading it, so there's
+        // nothing here for this to toggle on the slice plane.
         public void SetOpaque(bool opaque)
         {
-            float value = opaque ? 1f : 0f;
-
             if (Material != null)
-                Material.SetFloat(OpaqueId, value);
-            if (SliceMaterial != null)
-                SliceMaterial.SetFloat(OpaqueId, value);
+                Material.SetFloat(OpaqueId, opaque ? 1f : 0f);
         }
 
         void OnDestroy()

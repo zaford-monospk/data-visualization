@@ -53,7 +53,6 @@ namespace Monospark
         bool _volumeStaticVisible = true;
         bool _volumeSlice2DVisible = true;
         bool _volumeStaticOpaque;
-        bool _volumeSlice2DOpaque;
         bool _volumeStaticLoading;
         bool _volumeSlice2DLoading;
         string _volumeStaticPathError;
@@ -63,7 +62,7 @@ namespace Monospark
         bool _collapsed;
 
         const float PanelWidth = 380f;
-        const float PanelHeight = 660f;
+        const float PanelHeight = 640f;
         const float HeaderHeight = 30f;
 
         static GUIStyle _errorStyle;
@@ -159,13 +158,15 @@ namespace Monospark
         // ALREADY effectively a single 2D slice (e.g. a CFD "X1"/"X2"
         // plane-cut export, see VtkFrameReader.BuildData(OnProcessTex2DData))
         // and displays it directly on TargetPlane via
-        // VtkFrameRenderer.SetSlice2D (VolumeSlicePlane.shader's
-        // _Use2DSlice mode), skipping the raymarched-cube path (Volume
-        // Static, above) entirely -- Create surfaces "not a single 2D
-        // slice" the same way as any other failed load. Visibility here
+        // VtkFrameRenderer.SetSlice2D, skipping the raymarched-cube path
+        // (Volume Static, above) entirely -- Create surfaces "not a single
+        // 2D slice" the same way as any other failed load. Visibility here
         // uses SetSliceVisibility (TargetPlane), not SetVisibility
         // (TargetCube, untouched by this section) -- so this needs a
         // concrete VtkFrameRenderer reference, not just IRenderStateControl.
+        // No opaque toggle here (unlike Volume Static, below) --
+        // VolumeSlicePlane.shader has no such property any more, it's
+        // always fully opaque wherever it draws at all.
         void DrawVolumeSlice2DSection()
         {
             GUILayout.Label("Volume Slice 2D (CSV, direct)" + (_volumeSlice2DLoading ? " (loading...)" : ""));
@@ -200,7 +201,7 @@ namespace Monospark
                     _volumeSlice2DLoading = true;
                     _volumeSlice2D = CFDFactory.Instance.CreateSlice2DFromCsv(
                         resolvedPath, VolumeSlice2DPosition, Quaternion.Euler(VolumeSlice2DEulerRotation),
-                        _ => _volumeSlice2DLoading = false, _volumeSlice2DWorldUp, opaque: _volumeSlice2DOpaque);
+                        _ => _volumeSlice2DLoading = false, _volumeSlice2DWorldUp);
                     _volumeSlice2DVisible = true;
                 }
             }
@@ -216,8 +217,6 @@ namespace Monospark
                 _volumeSlice2D?.SetSliceVisibility(_volumeSlice2DVisible);
             }
             GUI.enabled = true;
-
-            DrawOpaqueToggle(_volumeSlice2D, ref _volumeSlice2DOpaque);
         }
 
         // Editor-only: there's no cross-platform runtime file/folder picker

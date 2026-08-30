@@ -220,31 +220,26 @@ namespace Monospark
 
         // Same _CFDVolume/VolumeStatic prefab as CreateVolumeStatic, but
         // drives TargetPlane/SliceMaterial directly via
-        // VtkFrameRenderer.SetSlice2D (VolumeSlicePlane.shader's _Use2DSlice
-        // mode) instead of TargetCube/Material's raymarched Texture3D path --
-        // for a CSV that's ALREADY effectively a single 2D slice (e.g. a CFD
-        // "X1"/"X2" plane-cut export, see VtkFrameReader.BuildData(
-        // OnProcessTex2DData)). onComplete(false) fires if the CSV isn't
-        // genuinely planar (not exactly one degenerate axis) as well as on
-        // any other load failure. TargetCube/Material are left completely
-        // untouched by this call -- only the slice plane shows this data.
-        // opaque is applied immediately (VtkFrameRenderer.SetOpaque doesn't
-        // depend on the texture having loaded) -- forces the slice's alpha
-        // to 1 wherever it's within [_ClipMin, _ClipMax], instead of the
-        // default value-based fade, which is usually what you want once
-        // Build2DTexture's hole-filling has already made the slice fully
-        // occupied (a fade there no longer means "no data", just an
-        // unwanted see-through gradient).
+        // VtkFrameRenderer.SetSlice2D instead of TargetCube/Material's
+        // raymarched Texture3D path -- for a CSV that's ALREADY effectively
+        // a single 2D slice (e.g. a CFD "X1"/"X2" plane-cut export, see
+        // VtkFrameReader.BuildData(OnProcessTex2DData)). onComplete(false)
+        // fires if the CSV isn't genuinely planar (not exactly one
+        // degenerate axis) as well as on any other load failure.
+        // TargetCube/Material are left completely untouched by this call --
+        // only the slice plane shows this data. No opaque parameter here
+        // (unlike CreateVolumeStatic): VolumeSlicePlane.shader is always
+        // fully opaque wherever it draws at all now (it clip()s away
+        // out-of-range/unfilled pixels instead of fading them) -- see the
+        // shader's own header comment.
         public VtkFrameRenderer CreateSlice2DFromCsv(
             string dataPath, Vector3 worldPosition, Quaternion rotation, Action<bool> onComplete = null,
-            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk, bool opaque = false)
+            WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
         {
             GameObject instance = InstantiatePrefab(_raymarchVolumeStatic, worldPosition, rotation);
             var renderer = instance.GetComponent<VtkFrameRenderer>();
             if (renderer == null)
                 throw new MissingComponentException($"{_raymarchVolumeStatic} prefab has no {nameof(VtkFrameRenderer)}.");
-
-            renderer.SetOpaque(opaque);
 
             var reader = new VtkFrameReader { WorldUp = worldUp };
 
@@ -264,6 +259,103 @@ namespace Monospark
 
             instance.AddComponent<DataConvertManager>().GetMap(OnTexture2DReady, dataPath, reader, pathMode);
             return renderer;
+        }
+
+        // Keeps the LUT sample position from ever landing exactly on 0 or 1,
+        // same convention/reason as the shaders' own LutEdgeInset (see
+        // VolumeSlicePlane.shader) -- sampling AT either edge hits an
+        // ambiguous boundary position of the LUT texture.
+        const float LutEdgeInset = 0.001f;
+
+        // Unlike CreateVolumeStatic/CreateSlice2DFromCsv, this doesn't spawn
+        // any renderer/prefab at all -- there's nothing to place in the
+        // world here, just a texture. It reads dataPath the same way
+        // CreateSlice2DFromCsv does (CSV-only, exactly one degenerate axis
+        // -- see VtkFrameReader.BuildData(OnProcessTex2DData)), but instead
+        // of handing the raw normalized-value texture to VolumeSlicePlane.
+        // shader for per-frame LUT sampling, it bakes the final color into
+        // every pixel itself, once, on the CPU: recovers each pixel's real
+        // Celsius value from the raw texture (normalized against the CSV's
+        // own min/max), remaps it into [minTemperatureCelsius,
+        // maxTemperatureCelsius] (same start/end convention as
+        // VtkFrameRenderer.SetLutTemperatureRange -- independent of the
+        // CSV's own range), and samples lutTexture at that U. The result is
+        // a plain color Texture2D any ordinary shader (a Standard/Lit/Unlit
+        // material's albedo, for instance) can use directly, with no custom
+        // shader or per-frame LUT logic required. lutTexture must have Read/
+        // Write enabled (GetPixelBilinear needs CPU-side pixel access).
+        // onComplete receives the baked texture on success, or null if the
+        // CSV isn't genuinely planar (or any other load failure) -- there's
+        // no "false" case to report otherwise, unlike the bool onComplete
+        // callbacks above, since the texture itself IS the result.
+        public void CreateSimpleTexture2DFromCsv(
+            string dataPath, Texture2D lutTexture, float minTemperatureCelsius, float maxTemperatureCelsius,
+            Action<Texture2D> onComplete, WorldUpAxis worldUp = WorldUpAxis.Y, DataPathMode pathMode = DataPathMode.Disk)
+        {
+            if (lutTexture == null)
+                throw new ArgumentNullException(nameof(lutTexture));
+
+            var reader = new VtkFrameReader { WorldUp = worldUp };
+
+            void OnTexture2DReady(DataConverter.Progress progress, Texture2D rawTexture)
+            {
+                switch (progress.Status)
+                {
+                    case DataConverter.eStatus.SUCCESS:
+                        Texture2D baked = BakeSimpleTexture2D(
+                            rawTexture, lutTexture, reader.ValueMin, reader.ValueMax,
+                            minTemperatureCelsius, maxTemperatureCelsius);
+                        Destroy(rawTexture); // only the baked copy is handed back -- the raw normalized texture was scratch data
+                        onComplete?.Invoke(baked);
+                        break;
+                    case DataConverter.eStatus.ERROR:
+                        onComplete?.Invoke(null);
+                        break;
+                }
+            }
+
+            // No GameObject/prefab to host a DataConvertManager on (nothing
+            // is instantiated here) -- DataConvertManager.GetMap is just a
+            // thin InitFromPath + BuildData wrapper anyway, so call the
+            // reader directly instead.
+            reader.InitFromPath(dataPath, pathMode);
+            reader.BuildData((DataConverter.OnProcessTex2DData)OnTexture2DReady);
+        }
+
+        // r is normalized 0..1 against the CSV's own [rawValueMin, rawValueMax]
+        // (see VtkFrameReader.Build2DTexture) -- recovers the real Celsius
+        // value from it, then remaps that into the LUT's own, independently
+        // chosen [minTemperatureCelsius, maxTemperatureCelsius] range before
+        // sampling, clamping out-of-range values to the nearest end's color
+        // rather than wrapping/extrapolating past it.
+        static Texture2D BakeSimpleTexture2D(
+            Texture2D rawTexture, Texture2D lutTexture, float rawValueMin, float rawValueMax,
+            float minTemperatureCelsius, float maxTemperatureCelsius)
+        {
+            Color[] rawPixels = rawTexture.GetPixels();
+            var bakedPixels = new Color[rawPixels.Length];
+
+            float rawRange = Mathf.Max(rawValueMax - rawValueMin, Mathf.Epsilon);
+            float lutRange = Mathf.Max(maxTemperatureCelsius - minTemperatureCelsius, Mathf.Epsilon);
+
+            for (int i = 0; i < rawPixels.Length; i++)
+            {
+                float celsius = rawValueMin + rawPixels[i].r * rawRange;
+
+                float u01 = Mathf.Clamp01((celsius - minTemperatureCelsius) / lutRange);
+                float u = Mathf.Lerp(LutEdgeInset, 1f - LutEdgeInset, u01);
+
+                bakedPixels[i] = lutTexture.GetPixelBilinear(u, 0.5f);
+            }
+
+            var baked = new Texture2D(rawTexture.width, rawTexture.height, TextureFormat.RGBA32, false)
+            {
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear
+            };
+            baked.SetPixels(bakedPixels);
+            baked.Apply();
+            return baked;
         }
 
         static GameObject InstantiatePrefab(string resourcePath, Vector3 worldPosition, Quaternion rotation)

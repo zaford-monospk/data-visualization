@@ -21,6 +21,18 @@ namespace Monospark
         const int MaxResolution = 128;
         const int StreamBufferSize = 1 << 20; // 1 MB — fewer underlying reads over a ~4M-line file
 
+        // Fixed Celsius calibration range ToTexture3D's r channel is
+        // normalized against -- NOT this file's own local min/max. See
+        // VtkFrameReader.TemperatureRangeMin's doc comment for why (two
+        // different exports of the same physical space can have very
+        // different local temperature spreads, which made the same color
+        // mean a different absolute temperature depending on which file it
+        // came from). Must match VtkFrameReader's identical constants (kept
+        // duplicated rather than shared, same as MinResolution/MaxResolution
+        // above).
+        const float TemperatureRangeMin = 0f;
+        const float TemperatureRangeMax = 100f;
+
         public string FieldName { get; set; } = "Temperature(C)";
 
         // When true (default), every CELL_DATA section (each SCALARS/VECTORS
@@ -47,12 +59,13 @@ namespace Monospark
         // real-world extents instead of guessing from voxel-grid resolution.
         public Vector3 Size => _bounds.size;
 
-        // Raw (un-normalized) min/max of FieldName's values across all cells
-        // -- valid once BuildData(OnProcessTex3DData)'s callback has fired
-        // with SUCCESS. Lets a caller (e.g. VtkFrameRenderer) convert a
-        // real-world value (e.g. a Celsius temperature) into the Texture3D's
-        // normalized 0..1 space the same way ToTexture3D itself does,
-        // instead of duplicating/guessing that range.
+        // The fixed [TemperatureRangeMin, TemperatureRangeMax] calibration
+        // range the built Texture3D was ACTUALLY normalized against -- NOT
+        // this file's own local min/max (see TemperatureRangeMin's doc
+        // comment). Valid once BuildData(OnProcessTex3DData)'s callback has
+        // fired with SUCCESS. Lets a caller (e.g. VtkFrameRenderer) convert
+        // a real-world Celsius value into the Texture3D's normalized 0..1
+        // space the same way ToTexture3D itself does.
         public float ValueMin { get; private set; }
         public float ValueMax { get; private set; }
 
@@ -462,7 +475,19 @@ namespace Monospark
                 maxValue = Mathf.Max(maxValue, value);
             }
 
-            float range = Mathf.Max(maxValue - minValue, Mathf.Epsilon);
+            // Clamped, not left to run past 0/1: a value outside
+            // [TemperatureRangeMin, TemperatureRangeMax] (out-of-calibration
+            // data) would otherwise land past the LUT's own [0, 1] texture
+            // edge -- clamping pins it to that edge's color instead of
+            // sampling garbage.
+            if (minValue < TemperatureRangeMin || maxValue > TemperatureRangeMax)
+            {
+                Debug.LogWarning($"[VtkUnstructuredGridReader] '{scalarField}' range [{minValue:F1}, {maxValue:F1}] falls " +
+                                  $"outside the fixed calibration range [{TemperatureRangeMin:F1}, {TemperatureRangeMax:F1}] " +
+                                  "-- out-of-range values will clamp to the LUT's nearest edge color.");
+            }
+
+            float calibrationRange = TemperatureRangeMax - TemperatureRangeMin;
             var colors = new Color[voxelCountTotal];
             for (int i = 0; i < voxelCountTotal; i++)
             {
@@ -471,12 +496,16 @@ namespace Monospark
                     colors[i] = Color.clear;
                     continue;
                 }
-                float normalized = (voxelSum[i] / voxelHits[i] - minValue) / range;
+                float normalized = Mathf.Clamp01((voxelSum[i] / voxelHits[i] - TemperatureRangeMin) / calibrationRange);
                 colors[i] = new Color(normalized, normalized, normalized, 1f);
             }
 
-            ValueMin = minValue;
-            ValueMax = maxValue;
+            // Same fixed range every file is normalized against -- see
+            // TemperatureRangeMin's doc comment -- not this file's own
+            // minValue/maxValue (still used above only to detect/warn about
+            // out-of-calibration data).
+            ValueMin = TemperatureRangeMin;
+            ValueMax = TemperatureRangeMax;
 
             // RGBAHalf, not RFloat: RFloat is single-channel and would silently
             // drop the alpha (occupancy) channel written above.

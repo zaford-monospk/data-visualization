@@ -43,14 +43,32 @@ namespace Monospark
     // requires the source to be a genuine single 2D slice (exactly one axis
     // with no real spatial extent, e.g. a CFD "X1"/"X2" plane-cut export):
     // it voxelizes directly into a Texture2D over the two real axes, for
-    // VolumeSlicePlane.shader's _Use2DSlice mode to sample via the plane
-    // mesh's own UV instead of reprojecting through a 3D volume matrix.
+    // VolumeSlicePlane.shader to sample via the plane mesh's own UV.
     public class VtkFrameReader : DataConverter
     {
         const int MinResolution = 8;
         const int MaxResolution = 128;
         const int StreamBufferSize = 1 << 20; // 1 MB — fewer underlying reads over a large CSV
         const float KelvinToCelsiusOffset = 273.15f;
+
+        // Fixed Celsius calibration range every Texture3D/Texture2D's r
+        // channel is normalized against -- NOT each file's own local
+        // min/max. Two different CFD exports of the very same physical
+        // space can have very different local temperature spreads (e.g.
+        // Summer1_X1.csv's hottest cell is ~41°C, Summer1_Z.csv's is
+        // ~49°C); normalizing each against its own min/max made the same
+        // color mean a different absolute temperature depending on which
+        // file it came from, and the same real temperature render as a
+        // different color between files. A shared, fixed scale fixes both
+        // -- the tradeoff is any one file that only spans a narrow slice of
+        // [0, 100] uses less of the LUT's contrast, which
+        // VtkFrameRenderer.SetLutTemperatureRange exists to claw back
+        // (narrows the visible band without touching how the texture itself
+        // was normalized). Must match VtkUnstructuredGridReader's identical
+        // constants (kept duplicated rather than shared, same as
+        // MinResolution/MaxResolution above).
+        const float TemperatureRangeMin = 0f;
+        const float TemperatureRangeMax = 100f;
 
         // .vtk SCALARS field name, forwarded to the inner VtkUnstructuredGridReader.
         public string FieldName { get; set; } = "Temperature(C)";
@@ -93,12 +111,14 @@ namespace Monospark
         // voxel-grid resolution.
         public Vector3 DataSize { get; private set; }
 
-        // Raw (un-normalized, Celsius after any Kelvin conversion) min/max of
-        // the voxelized value across every point/cell -- valid once
-        // BuildData(OnProcessTex3DData)'s callback has fired with SUCCESS.
-        // Lets a caller (e.g. VtkFrameRenderer.SetLutTemperatureRange)
-        // convert a real Celsius value into the Texture3D's normalized 0..1
-        // space the same way ToTexture3D itself does.
+        // The fixed [TemperatureRangeMin, TemperatureRangeMax] calibration
+        // range the built Texture3D/Texture2D was ACTUALLY normalized
+        // against -- NOT this file's own local min/max (see
+        // TemperatureRangeMin's doc comment). Valid once BuildData's
+        // callback has fired with SUCCESS. Lets a caller (e.g.
+        // VtkFrameRenderer.SetLutTemperatureRange) convert a real Celsius
+        // value into the texture's normalized 0..1 space the same way
+        // ToTexture3D/Build2DTexture themselves do.
         public float ValueMin { get; private set; }
         public float ValueMax { get; private set; }
 
@@ -317,16 +337,14 @@ namespace Monospark
         // single slice -- exactly one axis with no real spatial extent (see
         // ComputeResolution/DegenerateAxisSize), e.g. a CFD "X1"/"X2"
         // plane-cut export (X collapses) or a "Z" export (Z collapses).
-        // BuildData(OnProcessTex3DData) still handles this same data fine,
-        // but bakes it into a (MinAxisSize-padded, 1-voxel-thick) Texture3D
-        // slab that VolumeSlicePlane.shader then has to reproject an
-        // arbitrary cutting plane through via a world-to-local matrix, just
-        // to read a slice that was already 2D to begin with. This skips that
-        // indirection: the two REAL axes voxelize directly into a Texture2D,
-        // which VolumeSlicePlane.shader (its _Use2DSlice mode) samples via
-        // the plane mesh's own UV -- no reprojection, no risk of the plane
-        // drifting outside the padded box's thin extent. CSV-only; throws if
-        // the source isn't genuinely planar (not exactly one degenerate axis).
+        // BuildData(OnProcessTex3DData) still handles this same data fine
+        // too, baking it into a (MinAxisSize-padded, 1-voxel-thick) Texture3D
+        // slab -- but VolumeSlicePlane.shader has no way to display a
+        // Texture3D at all (see its own header comment), so this is the only
+        // path that feeds it: the two REAL axes voxelize directly into a
+        // Texture2D, which the shader samples via the plane mesh's own UV.
+        // CSV-only; throws if the source isn't genuinely planar (not exactly
+        // one degenerate axis).
         public override void BuildData(OnProcessTex2DData callback)
         {
             CoroutineRunner.Run(BuildTex2DRoutine(callback));
@@ -639,8 +657,15 @@ namespace Monospark
         // Same bucket-and-average voxelization as VtkUnstructuredGridReader.ToTexture3D,
         // just against raw CSV points instead of cell centroids -- a point-cloud
         // export has no cell connectivity, so each row already IS a sample.
-        // Also returns the raw (un-normalized) min/max values voxelized --
-        // BuildCsvTexture caches these on ValueMin/ValueMax.
+        // Normalizes against the fixed [TemperatureRangeMin, TemperatureRangeMax]
+        // calibration range, not this file's own min/max -- see
+        // TemperatureRangeMin's doc comment for why. Also returns that same
+        // fixed range (not the file's actual min/max) -- BuildCsvTexture
+        // caches it on ValueMin/ValueMax, which VtkFrameRenderer.
+        // SetLutTemperatureRange uses to convert a real Celsius value into
+        // this texture's normalized 0..1 space, so it needs the range the
+        // texture was ACTUALLY normalized against, not the narrower range
+        // this one file happens to span.
         static (Texture3D texture, float valueMin, float valueMax) ToTexture3D(Vector3[] points, float[] values, Bounds bounds)
         {
             (int resX, int resY, int resZ) = ComputeResolution(points.Length, bounds.size);
@@ -677,7 +702,14 @@ namespace Monospark
                 maxValue = Mathf.Max(maxValue, value);
             }
 
-            float range = Mathf.Max(maxValue - minValue, Mathf.Epsilon);
+            // Clamped, not left to run past 0/1: a value outside
+            // [TemperatureRangeMin, TemperatureRangeMax] (out-of-calibration
+            // data) would otherwise land past the LUT's own [0, 1] texture
+            // edge -- clamping pins it to that edge's color instead of
+            // sampling garbage.
+            LogIfOutOfCalibrationRange(minValue, maxValue, "3D volume");
+
+            float calibrationRange = TemperatureRangeMax - TemperatureRangeMin;
             var colors = new Color[voxelCountTotal];
             for (int i = 0; i < voxelCountTotal; i++)
             {
@@ -686,7 +718,7 @@ namespace Monospark
                     colors[i] = Color.clear;
                     continue;
                 }
-                float normalized = (voxelSum[i] / voxelHits[i] - minValue) / range;
+                float normalized = Mathf.Clamp01((voxelSum[i] / voxelHits[i] - TemperatureRangeMin) / calibrationRange);
                 colors[i] = new Color(normalized, normalized, normalized, 1f);
             }
 
@@ -700,7 +732,21 @@ namespace Monospark
             texture.SetPixels(colors);
             texture.Apply();
 
-            return (texture, minValue, maxValue);
+            return (texture, TemperatureRangeMin, TemperatureRangeMax);
+        }
+
+        // Warns rather than throws/clamps silently: data outside the fixed
+        // calibration range still renders (clamped to the LUT's nearest
+        // edge color above), but it's worth knowing about since it means
+        // TemperatureRangeMin/Max no longer actually cover this file's data.
+        static void LogIfOutOfCalibrationRange(float minValue, float maxValue, string what)
+        {
+            if (minValue < TemperatureRangeMin || maxValue > TemperatureRangeMax)
+            {
+                Debug.LogWarning($"[VtkFrameReader] {what} data range [{minValue:F1}, {maxValue:F1}] falls outside the " +
+                                  $"fixed calibration range [{TemperatureRangeMin:F1}, {TemperatureRangeMax:F1}] -- " +
+                                  "out-of-range values will clamp to the LUT's nearest edge color.");
+            }
         }
 
         // A CFD "plane cut" export (e.g. Summer1_X1.csv/X2.csv, where every
@@ -813,17 +859,21 @@ namespace Monospark
             }
             FillEmptyCells(cellValue, hasValue, resU, resV);
 
-            float range = Mathf.Max(maxValue - minValue, Mathf.Epsilon);
+            // Same fixed [TemperatureRangeMin, TemperatureRangeMax]
+            // calibration range as ToTexture3D, not this file's own
+            // min/max -- see TemperatureRangeMin's doc comment for why.
+            LogIfOutOfCalibrationRange(minValue, maxValue, "2D slice");
+
+            float calibrationRange = TemperatureRangeMax - TemperatureRangeMin;
             var colors = new Color[voxelCountTotal];
             for (int i = 0; i < voxelCountTotal; i++)
             {
-                float normalized = (cellValue[i] - minValue) / range;
+                float normalized = Mathf.Clamp01((cellValue[i] - TemperatureRangeMin) / calibrationRange);
                 colors[i] = new Color(normalized, normalized, normalized, 1f);
             }
 
-            // Same RGBAHalf/.r=value/.a=occupancy convention as ToTexture3D,
-            // so VolumeSlicePlane.shader's _Use2DSlice sampling code reads
-            // identically to its Texture3D path (just one fewer UV axis) --
+            // Same RGBAHalf/.r=value/.a=occupancy convention as ToTexture3D
+            // (VolumeSlicePlane.shader's sampling reads r/a the same way) --
             // occupancy (.a/g) is uniformly 1 here since FillEmptyCells
             // leaves nothing unfilled (barring a genuinely empty grid,
             // already ruled out by the points.Length == 0 check above).
@@ -835,7 +885,7 @@ namespace Monospark
             texture.SetPixels(colors);
             texture.Apply();
 
-            return (texture, minValue, maxValue);
+            return (texture, TemperatureRangeMin, TemperatureRangeMax);
         }
 
         // Multi-source BFS flood fill: seeds the queue with every cell that
