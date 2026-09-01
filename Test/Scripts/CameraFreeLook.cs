@@ -30,6 +30,7 @@ namespace Monospark
 
         float _yaw;
         float _pitch;
+        bool _lookTriggeredLastFrame;
 
         public bool MoveHorizontally = false;
         public bool WASDMoveEnabled = true;
@@ -77,10 +78,33 @@ namespace Monospark
                 UpdateMove(Keyboard.current);
             
             Mouse mouse = Mouse.current;
-            if (mouse == null || !IsLookTriggered(mouse))
-                return;
+            bool triggered = mouse != null && IsLookTriggered(mouse);
 
-            UpdateLook(mouse);
+            if (triggered && !_lookTriggeredLastFrame)
+            {
+                // Just started looking this frame -- discard this frame's
+                // delta instead of applying it. The first read after a gap
+                // (button just pressed, or the window just regained focus)
+                // can report a large accumulated/flushed delta rather than
+                // real in-frame mouse movement, which would otherwise yank
+                // the camera through several rotations on first click.
+                mouse.delta.ReadValue();
+            }
+            else if (triggered)
+            {
+                UpdateLook(mouse);
+            }
+
+            _lookTriggeredLastFrame = triggered;
+        }
+
+        void OnApplicationFocus(bool hasFocus)
+        {
+            // Force the next triggered frame (after regaining OR losing
+            // focus) to go through the discard branch above, since a focus
+            // change is exactly when the OS/input backend can flush a
+            // large queued delta.
+            _lookTriggeredLastFrame = false;
         }
 
         bool IsLookTriggered(Mouse mouse) => LookTrigger switch

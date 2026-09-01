@@ -1,6 +1,6 @@
 {
   "name": "com.monospark.data-visualization",
-  "version": "1.17.2",
+  "version": "1.17.3",
   "displayName": "Monospark Data Visualization",
   "description": "data visualization (rendering) package",
   "icon": ".icon.png",
