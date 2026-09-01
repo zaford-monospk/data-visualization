@@ -73,13 +73,14 @@ namespace Monospark
 
         void Update()
         {
+            if (WASDMoveEnabled)
+                UpdateMove(Keyboard.current);
+            
             Mouse mouse = Mouse.current;
             if (mouse == null || !IsLookTriggered(mouse))
                 return;
 
             UpdateLook(mouse);
-            if (WASDMoveEnabled)
-                UpdateMove(Keyboard.current);
         }
 
         bool IsLookTriggered(Mouse mouse) => LookTrigger switch
