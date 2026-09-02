@@ -28,9 +28,16 @@ namespace Monospark
         public float LookSensitivity = 0.1f;
         public float MaxPitch = 89f;
 
+        // A single-frame mouse.delta larger than this (in pixels) is treated
+        // as an input-backend glitch rather than real movement -- e.g. the
+        // OS/Input System flushing a queued delta on the first click or when
+        // the window regains focus -- and is ignored instead of applied, so
+        // it doesn't whip the camera through several rotations in one frame.
+        public float MaxLookDelta = 100f;
+
         float _yaw;
         float _pitch;
-        bool _lookTriggeredLastFrame;
+        bool _wasLookTriggered;
 
         public bool MoveHorizontally = false;
         public bool WASDMoveEnabled = true;
@@ -67,6 +74,20 @@ namespace Monospark
 
         void Start()
         {
+            SyncYawPitchFromTransform();
+        }
+
+        // Rebaselines _yaw/_pitch from the transform's actual current
+        // rotation. Called once up front, and again on every not-looking ->
+        // looking transition -- if anything rotated the object while we
+        // weren't the ones driving it (another script's setup, an Inspector
+        // edit, a rig repositioning the camera after our Start() already
+        // ran), our cached _yaw/_pitch would otherwise be stale and the next
+        // UpdateLook would snap transform.rotation from its real current
+        // value to that stale one, which looks exactly like an unprompted
+        // big rotation on first click.
+        void SyncYawPitchFromTransform()
+        {
             Vector3 euler = transform.eulerAngles;
             _yaw = euler.y;
             _pitch = euler.x > 180f ? euler.x - 360f : euler.x;
@@ -76,35 +97,19 @@ namespace Monospark
         {
             if (WASDMoveEnabled)
                 UpdateMove(Keyboard.current);
-            
+
             Mouse mouse = Mouse.current;
             bool triggered = mouse != null && IsLookTriggered(mouse);
 
-            if (triggered && !_lookTriggeredLastFrame)
+            if (triggered)
             {
-                // Just started looking this frame -- discard this frame's
-                // delta instead of applying it. The first read after a gap
-                // (button just pressed, or the window just regained focus)
-                // can report a large accumulated/flushed delta rather than
-                // real in-frame mouse movement, which would otherwise yank
-                // the camera through several rotations on first click.
-                mouse.delta.ReadValue();
-            }
-            else if (triggered)
-            {
+                if (!_wasLookTriggered)
+                    SyncYawPitchFromTransform();
+
                 UpdateLook(mouse);
             }
 
-            _lookTriggeredLastFrame = triggered;
-        }
-
-        void OnApplicationFocus(bool hasFocus)
-        {
-            // Force the next triggered frame (after regaining OR losing
-            // focus) to go through the discard branch above, since a focus
-            // change is exactly when the OS/input backend can flush a
-            // large queued delta.
-            _lookTriggeredLastFrame = false;
+            _wasLookTriggered = triggered;
         }
 
         bool IsLookTriggered(Mouse mouse) => LookTrigger switch
@@ -117,6 +122,9 @@ namespace Monospark
         void UpdateLook(Mouse mouse)
         {
             Vector2 delta = mouse.delta.ReadValue();
+            if (delta.magnitude > MaxLookDelta)
+                return; // ignore an implausible single-frame spike instead of applying it
+
             _yaw += delta.x * LookSensitivity;
             _pitch -= delta.y * LookSensitivity;
             _pitch = Mathf.Clamp(_pitch, -MaxPitch, MaxPitch);
